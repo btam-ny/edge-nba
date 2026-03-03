@@ -139,33 +139,73 @@ function parseEventProps(event) {
 }
 
 // ─── APPLY MODEL ADJUSTMENTS + COMPUTE EV ─────────────────────────────────
-// Since we don't have player game logs in this version, we use a simple
-// line-centered normal distribution model with adjustments applied as
-// multipliers on the expected value. The book line IS our baseline.
-function applyAdjustmentsAndEV(props, teamDef) {
-  return props.map(prop => {
-    const { line, overOdds, underOdds, homeAbbr, awayAbbr, market } = prop;
+function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
+  // Pre-calculate Missing Star Usage bump per team
+  const bumpPerTeam = {};
+  for (const [playerName, stats] of Object.entries(advancedData.players)) {
+    if (injuries[playerName] === "Out" && stats.usage > 0.25) {
+      bumpPerTeam[stats.team] = true;
+    }
+  }
 
-    // We don't know which team the player is on from Odds API alone
-    // Using a blanket home boost inflates the projected line, causing too many EV+ Overs.
-    // Let's remove the artificial home boost and tighten the pace/defensive multipliers.
-    const oppAbbr  = awayAbbr; 
+  return props.map(prop => {
+    const { player, line, overOdds, underOdds, homeAbbr, awayAbbr, market } = prop;
+
+    // Advanced Data links player to exactly 1 team
+    const playerAdv = advancedData.players[player] || { team: null, usage: 0 };
+    let playerTeam = playerAdv.team;
+    
+    // Fallback if player team not matched exactly (common with suffixes Jr/Sr/III)
+    if (!playerTeam) {
+      // Just guess based on the 2 teams in the game
+      playerTeam = awayAbbr; 
+    }
+
+    const isHome = (playerTeam === homeAbbr);
+    const oppAbbr = isHome ? awayAbbr : homeAbbr;
     
     const oppDef   = teamDef[oppAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
     const homeDef  = teamDef[homeAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
 
-    // Defensive adjustment (dampened to prevent wild swings)
+    // 1. Position/Defensive adjustment
     const defDiff     = oppDef.defRtg - LEAGUE_AVG_DEF_RTG;
     const defScale    = market === "3PM" ? 0.015 : market === "REB" ? 0.008 : market === "AST" ? 0.008 : 0.012;
     let   defMult     = 1 + (defDiff / 5) * defScale;
-    defMult           = Math.max(0.90, Math.min(1.10, defMult));
 
-    // Pace adjustment (dampened)
+    // 2. Pace adjustment
     const gamePace    = (homeDef.pace + oppDef.pace) / 2;
-    const paceMult    = Math.max(0.92, Math.min(1.08, 1 + ((gamePace - LEAGUE_AVG_PACE) / LEAGUE_AVG_PACE) * 0.4));
+    let   paceMult    = 1 + ((gamePace - LEAGUE_AVG_PACE) / LEAGUE_AVG_PACE) * 0.4;
 
-    // Adjusted expected value (book line as baseline, without the excessive +2.5 PTS home boost)
-    const adjLine     = (line * defMult * paceMult);
+    // 3. Home/Away Role Player Split (3PM gets major boost at home for non-stars)
+    let homeRoadMult = 1.0;
+    if (isHome && market === "3PM" && line < 18.5) {
+      homeRoadMult = 1.05;
+    } else if (!isHome && market === "3PM" && line < 18.5) {
+      homeRoadMult = 0.95;
+    }
+
+    // 4. Back-to-Back Rest Penalty
+    const isB2B = advancedData.b2bTeams.includes(playerTeam);
+    let b2bMult = 1.0;
+    if (isB2B) {
+      if (market === "PTS" || market === "AST") b2bMult = 0.97;
+      if (market === "3PM") b2bMult = 0.95;
+      if (market === "REB") b2bMult = 1.02; // more missed shots = more rebounds available
+    }
+
+    // 5. Usage Bump (Star Teammate is OUT)
+    let usageMult = 1.0;
+    // Don't apply usage bump to the star themselves who is OUT
+    if (bumpPerTeam[playerTeam] && injuries[player] !== "Out") {
+      usageMult = 1.08; 
+    }
+
+    // Combine all Multipliers
+    let finalMult = defMult * paceMult * homeRoadMult * b2bMult * usageMult;
+    finalMult = Math.max(0.80, Math.min(1.20, finalMult)); // hard cap multipliers
+
+    // Adjusted expected value (book line as baseline)
+    const adjLine = (line * finalMult);
 
     // Std dev estimate: tighter distributions lead to less extreme outlier probabilities
     const stdPcts     = { PTS: 0.28, REB: 0.32, AST: 0.35, "3PM": 0.45 };
@@ -189,9 +229,10 @@ function applyAdjustmentsAndEV(props, teamDef) {
       gamePace:   +gamePace.toFixed(1),
       defGrade,
       defRtg:     oppDef.defRtg,
-      defMult:    +defMult.toFixed(3),
-      paceMult:   +paceMult.toFixed(3),
-      homeBoost:  0, // Disabled to prevent over-skewing
+      finalMult:  +finalMult.toFixed(3),
+      isB2B,
+      usageBump:  usageMult > 1.0,
+      isHome,
       modelOver:  +modelOver.toFixed(4),
       modelUnder: +modelUnder.toFixed(4),
       evOver:     +evOver.toFixed(4),
@@ -382,8 +423,8 @@ export default function App() {
       }
 
       // ── Step 3: Apply adjustments + EV ──────────────────────────────────
-      setLoadingMsg("Applying defense · pace · home/away adjustments…");
-      const withEV = applyAdjustmentsAndEV(allProps, teamDef);
+      setLoadingMsg("Applying advanced adjustments (Def, Pace, B2B, H/A, Usage)…");
+      const withEV = applyAdjustmentsAndEV(allProps, teamDef, advancedData, injuries);
       setProps(withEV);
       setLastUpdated("UPDATED " + new Date().toLocaleTimeString());
 
@@ -434,7 +475,7 @@ export default function App() {
         }
         .app-header { padding: 18px 28px; }
         .app-body { padding: 22px 28px; }
-        .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+        .config-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 14px; }
         .config-panel { padding: 18px 22px; }
         
         @media (max-width: 768px) {
@@ -479,10 +520,12 @@ export default function App() {
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,${C.accent},transparent)` }} />
             <div className="config-grid">
               {[
-                { icon: "📡", label: "DATA SOURCE", value: "The Odds API" },
-                { icon: "🛡", label: "ADJ: DEFENSE", value: `Opp def rating via official NBA proxy (L10)` },
-                { icon: "⚡", label: "ADJ: PACE", value: `Game pace multiplier applied to EV` },
-                { icon: "🏥", label: "INJURIES", value: `Live updates from ESPN` },
+                { icon: "�", label: "DEF · PACE", value: "L10 Def proxy & aggregate game pace baseline" },
+                { icon: "🏠", label: "HOME SPLIT", value: "3PM volume & role-player momentum variance" },
+                { icon: "🏥", label: "USG BUMP", value: "Stars ruled OUT boost teammate projections" },
+                { icon: "🪫", label: "B2B REST", value: "Back-to-back rest penalties minus rebounding" },
+                { icon: "🛡", label: "DVP PROXY", value: "Overall def variance by stat category" },
+                { icon: "📡", label: "LIVE FEED", value: "The Odds API, real-time ESPN injury reports" },
               ].map(item => (
                 <div key={item.label} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 2, padding: "10px 12px" }}>
                   <div style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.accent, marginBottom: 3 }}>{item.icon} {item.label}</div>
