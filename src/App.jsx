@@ -297,7 +297,6 @@ export default function App() {
   const [teamDef,       setTeamDef]       = useState(TEAM_DEF_STATIC);
   const [teamDefSource, setTeamDefSource] = useState("STATIC");
   const [injuries,      setInjuries]      = useState({});
-  const [l10Stats,      setL10Stats]      = useState({});
   const [advancedData,  setAdvancedData]  = useState({ players: {}, b2bTeams: [] });
 
   useEffect(() => {
@@ -342,15 +341,6 @@ export default function App() {
       })
       .catch(err => console.error("Could not fetch injuries", err));
 
-    // 3. Fetch L10 Stats
-    fetch("/api/l10")
-      .then(res => res.json())
-      .then(data => {
-        if (data && Object.keys(data).length > 50) {
-          setL10Stats(data);
-        }
-      })
-      .catch(err => console.error("Could not fetch L10 stats", err));
 
     // 4. Fetch Advanced Stats & B2B
     fetch("/api/advanced")
@@ -649,14 +639,7 @@ export default function App() {
                   { key: "defGrade", label: "DEF" },
                 ]),
                 { key: "modelProb", label: "MODEL%" },
-                { key: "l10Averages", label: "L10 AVG" },
-              ];
 
-              return (
-                <div className="table-container">
-                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
-                    <thead>
-                      <tr style={{ background: C.surface2, borderBottom: `1px solid ${C.border}` }}>
                         {cols.map(col => (
                           <th key={col.key} className="mobile-head" onClick={() => handleSort(col.key)} style={{ padding: "10px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: sortCol===col.key ? C.accent : C.muted }}>
                             {col.label} <span style={{ opacity: sortCol===col.key ? 1 : 0.4 }}>{sortCol===col.key ? (sortAsc ? "↑" : "↓") : "↕"}</span>
@@ -671,14 +654,7 @@ export default function App() {
                         const maxEV   = Math.max(...tableRows.map(x => Math.abs(x.ev)));
                         const barW    = Math.min(50, Math.abs(r.ev) / (maxEV || 1) * 50);
                         const price   = r.bookOdds > 0 ? `+${r.bookOdds}` : `${r.bookOdds}`;
-                        const l10Val  = l10Stats[r.player]?.[r.market];
                         
-                        let l10Color = C.muted;
-                        if (l10Val !== undefined) {
-                          l10Color = r.direction === "Over" 
-                            ? (l10Val >= r.line ? C.positive : C.negative)
-                            : (l10Val <= r.line ? C.positive : C.negative);
-                        }
 
                         return (
                           <tr key={i} style={{ borderBottom: `1px solid rgba(30,45,61,0.5)`, background: i%2===0 ? "transparent" : "rgba(20,28,36,0.3)" }}>
@@ -732,9 +708,7 @@ export default function App() {
                             <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>
                               {(r.modelProb * 100).toFixed(0)}<span style={{ color: C.muted }}>%</span>
                             </td>
-                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 13, fontWeight: 700, color: l10Color }}>
-                              {l10Val !== undefined ? l10Val.toFixed(1) : "—"}
-                            </td>
+                            
                           </tr>
                         );
                       })}
