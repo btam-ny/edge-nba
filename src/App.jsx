@@ -245,8 +245,6 @@ export default function App() {
   const [loading,     setLoading]     = useState(false);
   const [loadingMsg,  setLoadingMsg]  = useState("");
   const [error,       setError]       = useState(null);
-  const [callsLeft,   setCallsLeft]   = useState(null);
-  const [callsUsed,   setCallsUsed]   = useState(0);
   const [lastUpdated, setLastUpdated] = useState("");
   const [statFilter,  setStatFilter]  = useState("ALL");
   const [dirFilter,   setDirFilter]   = useState("ALL");
@@ -257,8 +255,11 @@ export default function App() {
   const cache = useRef({});
   const [teamDef,       setTeamDef]       = useState(TEAM_DEF_STATIC);
   const [teamDefSource, setTeamDefSource] = useState("STATIC");
+  const [injuries,      setInjuries]      = useState({});
+  const [l10Stats,      setL10Stats]      = useState({});
 
   useEffect(() => {
+    // 1. Fetch Defense
     fetchLiveTeamDef()
       .then(data => {
         if (data && Object.keys(data).length > 20) {
@@ -267,15 +268,41 @@ export default function App() {
         }
       })
       .catch(() => {}); // silently fall back to static
+
+    // 2. Fetch Injuries
+    fetch("https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/injuries")
+      .then(res => res.json())
+      .then(data => {
+        const injuryMap = {};
+        if (data?.injuries) {
+          for (const teamItem of data.injuries) {
+            if (teamItem.injuries) {
+              for (const inj of teamItem.injuries) {
+                const player = inj.athlete?.displayName;
+                const status = inj.status || "Injured";
+                if (player) injuryMap[player] = status;
+              }
+            }
+          }
+        }
+        setInjuries(injuryMap);
+      })
+      .catch(err => console.error("Could not fetch injuries", err));
+
+    // 3. Fetch L10 Stats
+    fetch("/api/l10")
+      .then(res => res.json())
+      .then(data => {
+        if (data && Object.keys(data).length > 50) {
+          setL10Stats(data);
+        }
+      })
+      .catch(err => console.error("Could not fetch L10 stats", err));
   }, []);
 
   // ── API helpers ──────────────────────────────────────────────────────────
   async function oddsApiFetch(url) {
     const res  = await fetch(url);
-    const remaining = res.headers.get("x-requests-remaining");
-    const used      = res.headers.get("x-requests-used");
-    if (remaining !== null) setCallsLeft(+remaining);
-    if (used      !== null) setCallsUsed(+used);
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       throw new Error(body.message || `HTTP ${res.status}`);
@@ -376,7 +403,6 @@ export default function App() {
   }
 
   const loaded = props.length > 0;
-  const callsLeftColor = callsLeft === null ? C.muted : callsLeft > 200 ? C.positive : callsLeft > 50 ? "#ffb347" : C.negative;
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'DM Sans',sans-serif", fontSize: 14 }}>
@@ -388,7 +414,7 @@ export default function App() {
         }
         .app-header { padding: 18px 28px; }
         .app-body { padding: 22px 28px; }
-        .config-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+        .config-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
         .config-panel { padding: 18px 22px; }
         
         @media (max-width: 768px) {
@@ -398,7 +424,8 @@ export default function App() {
           .config-grid { grid-template-columns: 1fr; gap: 6px; margin-bottom: 10px; }
           .mobile-pad { padding: 8px 4px !important; }
           .mobile-head { padding: 10px 4px !important; font-size: 8px !important; letter-spacing: 0px !important; }
-          .player-name { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px !important; }
+          .player-name-text { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px !important; display: block; }
+          .injury-badge { font-size: 7px !important; padding: 1px 3px !important; margin-left: 4px !important; }
           .book-name { font-size: 9px !important; max-width: 50px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
           .stat-badge { padding: 2px 4px !important; font-size: 8px !important; }
           .text-sm-mobile { font-size: 10px !important; }
@@ -413,7 +440,7 @@ export default function App() {
         {/* HEADER */}
         <div className="app-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, background: "rgba(8,12,16,0.94)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 100 }}>
           <div>
-            <div style={{ ...mono, fontSize: 34, fontWeight: 900, letterSpacing: 6, color: C.accent, textShadow: `0 0 28px rgba(0,229,255,0.4)`, lineHeight: 1 }}>DEGEN Tool</div>
+            <div style={{ ...mono, fontSize: 34, fontWeight: 900, letterSpacing: 6, color: C.accent, textShadow: `0 0 28px rgba(0,229,255,0.4)`, lineHeight: 1 }}>Degen Tool by Tam</div>
             <div style={{ ...mono, fontSize: 10, letterSpacing: 3, color: C.text, opacity: 0.3 }}>NBA PROP FINDER · LIVE ODDS</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 24, ...mono, fontSize: 11 }}>
@@ -432,9 +459,10 @@ export default function App() {
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,${C.accent},transparent)` }} />
             <div className="config-grid">
               {[
-                { icon: "📡", label: "DATA SOURCE", value: "The Odds API · DraftKings · FanDuel · BetMGM" },
+                { icon: "📡", label: "DATA SOURCE", value: "The Odds API" },
                 { icon: "🛡", label: "ADJ: DEFENSE", value: `Opp def rating via official NBA proxy (L10)` },
                 { icon: "⚡", label: "ADJ: PACE", value: `Game pace multiplier applied to EV` },
+                { icon: "🏥", label: "INJURIES", value: `Live updates from ESPN` },
               ].map(item => (
                 <div key={item.label} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 2, padding: "10px 12px" }}>
                   <div style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.accent, marginBottom: 3 }}>{item.icon} {item.label}</div>
@@ -474,13 +502,12 @@ export default function App() {
 
           {/* SUMMARY */}
           {loaded && (
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(5,1fr)", gap: 1, background: C.border, border: `1px solid ${C.border}`, borderRadius: 2, marginBottom: 16, overflow: "hidden" }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 1, background: C.border, border: `1px solid ${C.border}`, borderRadius: 2, marginBottom: 16, overflow: "hidden" }}>
               {[
                 { label: "TOTAL PROPS", value: tableRows.length,                    color: C.neutral  },
                 { label: "POSITIVE EV",  value: posCount,                            color: C.positive },
                 { label: "BEST EDGE",    value: bestEv !== "—" ? bestEv + "%" : "—", color: C.accent   },
                 { label: "AVG EV%",      value: avgEv  !== "—" ? avgEv  + "%" : "—", color: C.muted    },
-                { label: "CALLS LEFT",   value: callsLeft ?? "—",                    color: callsLeftColor },
               ].map(cell => (
                 <div key={cell.label} style={{ background: C.surface, padding: "12px 16px" }}>
                   <div style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.muted, marginBottom: 3 }}>{cell.label}</div>
@@ -559,6 +586,7 @@ export default function App() {
                   { key: "defGrade", label: "DEF" },
                 ]),
                 { key: "modelProb", label: "MODEL%" },
+                { key: "l10Averages", label: "L10 AVG" },
               ];
 
               return (
@@ -580,11 +608,26 @@ export default function App() {
                         const maxEV   = Math.max(...tableRows.map(x => Math.abs(x.ev)));
                         const barW    = Math.min(50, Math.abs(r.ev) / (maxEV || 1) * 50);
                         const price   = r.bookOdds > 0 ? `+${r.bookOdds}` : `${r.bookOdds}`;
+                        const l10Val  = l10Stats[r.player]?.[r.market];
+                        
+                        let l10Color = C.muted;
+                        if (l10Val !== undefined) {
+                          l10Color = r.direction === "Over" 
+                            ? (l10Val >= r.line ? C.positive : C.negative)
+                            : (l10Val <= r.line ? C.positive : C.negative);
+                        }
 
                         return (
                           <tr key={i} style={{ borderBottom: `1px solid rgba(30,45,61,0.5)`, background: i%2===0 ? "transparent" : "rgba(20,28,36,0.3)" }}>
                             <td className="mobile-pad" style={{ padding: "10px 12px" }}>
-                              <div className="player-name" style={{ fontWeight: 500, fontSize: 13 }}>{r.player}</div>
+                              <div style={{ display: "flex", alignItems: "center", fontWeight: 500, fontSize: 13 }}>
+                                <span className="player-name-text">{r.player}</span>
+                                {injuries[r.player] && (
+                                  <span className="injury-badge" title={`Injury Status: ${injuries[r.player]}`} style={{ marginLeft: 6, display: "inline-flex", alignItems: "center", justifyContent: "center", background: injuries[r.player] === "Out" ? "rgba(255,61,113,0.15)" : "rgba(255,179,71,0.15)", color: injuries[r.player] === "Out" ? C.negative : "#ffb347", border: `1px solid ${injuries[r.player] === "Out" ? "rgba(255,61,113,0.3)" : "rgba(255,179,71,0.3)"}`, borderRadius: 2, padding: "1px 4px", fontSize: 9, fontWeight: 700, flexShrink: 0, ...mono }}>
+                                    {injuries[r.player] === "Out" ? "OUT" : injuries[r.player] === "Day-To-Day" ? "DTD" : injuries[r.player].toUpperCase()}
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td className="mobile-pad" style={{ padding: "10px 12px" }}>
                               <span className="stat-badge" style={{ background: C.surface2, border: `1px solid ${C.border}`, padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, color: C.neutral }}>{r.market}</span>
@@ -625,6 +668,9 @@ export default function App() {
                             )}
                             <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>
                               {(r.modelProb * 100).toFixed(0)}<span style={{ color: C.muted }}>%</span>
+                            </td>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 13, fontWeight: 700, color: l10Color }}>
+                              {l10Val !== undefined ? l10Val.toFixed(1) : "—"}
                             </td>
                           </tr>
                         );
