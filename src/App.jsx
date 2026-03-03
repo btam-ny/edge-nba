@@ -257,6 +257,7 @@ export default function App() {
   const [teamDefSource, setTeamDefSource] = useState("STATIC");
   const [injuries,      setInjuries]      = useState({});
   const [l10Stats,      setL10Stats]      = useState({});
+  const [advancedData,  setAdvancedData]  = useState({ players: {}, b2bTeams: [] });
 
   useEffect(() => {
     // Save to local storage whenever our core data updates
@@ -309,6 +310,14 @@ export default function App() {
         }
       })
       .catch(err => console.error("Could not fetch L10 stats", err));
+
+    // 4. Fetch Advanced Stats & B2B
+    fetch("/api/advanced")
+      .then(res => res.json())
+      .then(data => {
+        if (data?.players) setAdvancedData(data);
+      })
+      .catch(err => console.error("Could not fetch advanced data", err));
   }, []);
 
   // ── API helpers ──────────────────────────────────────────────────────────
