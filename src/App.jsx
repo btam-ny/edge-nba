@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
 const ODDS_API_KEY  = "33f7c85a41bd0aefe34d0c4e5fac6021";
@@ -8,10 +8,10 @@ const REGIONS       = "us";
 const ODDS_FORMAT   = "american";
 // Batch all markets per event to minimize calls (1 call per game not per market)
 const PROP_MARKETS  = "player_points,player_rebounds,player_assists,player_threes";
-const BOOKMAKERS    = "draftkings,fanduel,betmgm"; // limit to 3 books to keep response small
+const BOOKMAKERS    = "draftkings,fanduel"; // limit to 2 books to keep response small
 
 // ─── TEAM DEFENSIVE PROFILES (from live NBA API) ───────────────────────────
-const TEAM_DEF = {
+const TEAM_DEF_STATIC = {
   DET: { defRtg: 101.5, pace: 98.2  }, CLE: { defRtg: 104.6, pace: 96.8  },
   MIL: { defRtg: 115.1, pace: 91.4  }, CHI: { defRtg: 113.7, pace: 97.1  },
   IND: { defRtg: 118.5, pace: 102.3 }, ORL: { defRtg: 107.2, pace: 94.5  },
@@ -142,38 +142,34 @@ function parseEventProps(event) {
 // Since we don't have player game logs in this version, we use a simple
 // line-centered normal distribution model with adjustments applied as
 // multipliers on the expected value. The book line IS our baseline.
-function applyAdjustmentsAndEV(props) {
+function applyAdjustmentsAndEV(props, teamDef) {
   return props.map(prop => {
     const { line, overOdds, underOdds, homeAbbr, awayAbbr, market } = prop;
 
     // We don't know which team the player is on from Odds API alone
-    // Use home team context as default, user can filter
-    const oppAbbr  = awayAbbr; // conservative: use away as opponent for home players
-    const isHome   = true;     // default assumption
+    // Using a blanket home boost inflates the projected line, causing too many EV+ Overs.
+    // Let's remove the artificial home boost and tighten the pace/defensive multipliers.
+    const oppAbbr  = awayAbbr; 
+    
+    const oppDef   = teamDef[oppAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
+    const homeDef  = teamDef[homeAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
 
-    const oppDef   = TEAM_DEF[oppAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
-    const homeDef  = TEAM_DEF[homeAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
-
-    // Defensive adjustment
+    // Defensive adjustment (dampened to prevent wild swings)
     const defDiff     = oppDef.defRtg - LEAGUE_AVG_DEF_RTG;
-    const defScale    = market === "3PM" ? 0.035 : market === "REB" ? 0.015 : market === "AST" ? 0.012 : 0.03;
+    const defScale    = market === "3PM" ? 0.015 : market === "REB" ? 0.008 : market === "AST" ? 0.008 : 0.012;
     let   defMult     = 1 + (defDiff / 5) * defScale;
-    defMult           = Math.max(0.80, Math.min(1.20, defMult));
+    defMult           = Math.max(0.90, Math.min(1.10, defMult));
 
-    // Pace adjustment
+    // Pace adjustment (dampened)
     const gamePace    = (homeDef.pace + oppDef.pace) / 2;
-    const paceMult    = Math.max(0.88, Math.min(1.12, 1 + ((gamePace - LEAGUE_AVG_PACE) / LEAGUE_AVG_PACE) * 0.8));
+    const paceMult    = Math.max(0.92, Math.min(1.08, 1 + ((gamePace - LEAGUE_AVG_PACE) / LEAGUE_AVG_PACE) * 0.4));
 
-    // Home/away boost (raw values by market)
-    const homeBoosts  = { PTS: 2.5, REB: 0.4, AST: 0.3, "3PM": 0.2 };
-    const homeBoost   = isHome ? (homeBoosts[market] || 1.0) : -(homeBoosts[market] || 1.0);
+    // Adjusted expected value (book line as baseline, without the excessive +2.5 PTS home boost)
+    const adjLine     = (line * defMult * paceMult);
 
-    // Adjusted expected value (book line as baseline)
-    const adjLine     = (line * defMult * paceMult) + homeBoost;
-
-    // Std dev estimate: typically ~30-35% of mean for scoring stats
-    const stdPcts     = { PTS: 0.32, REB: 0.38, AST: 0.40, "3PM": 0.55 };
-    const adjStd      = adjLine * (stdPcts[market] || 0.35);
+    // Std dev estimate: tighter distributions lead to less extreme outlier probabilities
+    const stdPcts     = { PTS: 0.28, REB: 0.32, AST: 0.35, "3PM": 0.45 };
+    const adjStd      = adjLine * (stdPcts[market] || 0.30);
 
     // Model probability for over/under
     const zOver       = (line + 0.5 - adjLine) / adjStd;
@@ -195,13 +191,43 @@ function applyAdjustmentsAndEV(props) {
       defRtg:     oppDef.defRtg,
       defMult:    +defMult.toFixed(3),
       paceMult:   +paceMult.toFixed(3),
-      homeBoost,
+      homeBoost:  0, // Disabled to prevent over-skewing
       modelOver:  +modelOver.toFixed(4),
       modelUnder: +modelUnder.toFixed(4),
       evOver:     +evOver.toFixed(4),
       evUnder:    +evUnder.toFixed(4),
     };
   });
+}
+
+// ─── LIVE TEAM DEF from NBA API (Proxy via /api/defense) ──────────────────
+async function fetchLiveTeamDef() {
+  const res = await fetch("/api/defense");
+  if (!res.ok) throw new Error("Failed to fetch defense stats from proxy");
+  
+  const data = await res.json();
+  const result = {};
+
+  const NbaNamesToAbbr = {
+    "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",
+    "Charlotte Hornets": "CHA", "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE",
+    "Dallas Mavericks": "DAL", "Denver Nuggets": "DEN", "Detroit Pistons": "DET",
+    "Golden State Warriors": "GSW", "Houston Rockets": "HOU", "Indiana Pacers": "IND",
+    "LA Clippers": "LAC", "Los Angeles Lakers": "LAL", "Memphis Grizzlies": "MEM",
+    "Miami Heat": "MIA", "Milwaukee Bucks": "MIL", "Minnesota Timberwolves": "MIN",
+    "New Orleans Pelicans": "NOP", "New York Knicks": "NYK", "Oklahoma City Thunder": "OKC",
+    "Orlando Magic": "ORL", "Philadelphia 76ers": "PHI", "Phoenix Suns": "PHX",
+    "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC", "San Antonio Spurs": "SAS",
+    "Toronto Raptors": "TOR", "Utah Jazz": "UTA", "Washington Wizards": "WAS"
+  };
+
+  for (const [teamName, stats] of Object.entries(data)) {
+    const abbr = NbaNamesToAbbr[teamName];
+    if (abbr) {
+      result[abbr] = stats;
+    }
+  }
+  return result;
 }
 
 // ─── STYLES ────────────────────────────────────────────────────────────────
@@ -229,6 +255,19 @@ export default function App() {
   const [sortAsc,     setSortAsc]     = useState(false);
   const [showAdj,     setShowAdj]     = useState(false);
   const cache = useRef({});
+  const [teamDef,       setTeamDef]       = useState(TEAM_DEF_STATIC);
+  const [teamDefSource, setTeamDefSource] = useState("STATIC");
+
+  useEffect(() => {
+    fetchLiveTeamDef()
+      .then(data => {
+        if (data && Object.keys(data).length > 20) {
+          setTeamDef(data);
+          setTeamDefSource("LIVE");
+        }
+      })
+      .catch(() => {}); // silently fall back to static
+  }, []);
 
   // ── API helpers ──────────────────────────────────────────────────────────
   async function oddsApiFetch(url) {
@@ -292,12 +331,12 @@ export default function App() {
         callNum++;
 
         // Small delay to respect rate limits
-        await new Promise(r => setTimeout(r, 200));
+        await new Promise(r => setTimeout(r, 700));
       }
 
       // ── Step 3: Apply adjustments + EV ──────────────────────────────────
       setLoadingMsg("Applying defense · pace · home/away adjustments…");
-      const withEV = applyAdjustmentsAndEV(allProps);
+      const withEV = applyAdjustmentsAndEV(allProps, teamDef);
       setProps(withEV);
       setLastUpdated("UPDATED " + new Date().toLocaleTimeString());
 
@@ -342,40 +381,60 @@ export default function App() {
   return (
     <div style={{ background: C.bg, minHeight: "100vh", color: C.text, fontFamily: "'DM Sans',sans-serif", fontSize: 14 }}>
       <div style={{ position: "fixed", inset: 0, backgroundImage: gridBg, pointerEvents: "none", zIndex: 0 }} />
+      <style>{`
+        .table-container {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+        .app-header { padding: 18px 28px; }
+        .app-body { padding: 22px 28px; }
+        .config-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 14px; }
+        .config-panel { padding: 18px 22px; }
+        
+        @media (max-width: 768px) {
+          .app-header { padding: 12px 8px; flex-direction: column; align-items: flex-start !important; gap: 12px; }
+          .app-body { padding: 12px 6px; }
+          .config-panel { padding: 12px 10px; }
+          .config-grid { grid-template-columns: 1fr; gap: 6px; margin-bottom: 10px; }
+          .mobile-pad { padding: 8px 4px !important; }
+          .mobile-head { padding: 10px 4px !important; font-size: 8px !important; letter-spacing: 0px !important; }
+          .player-name { max-width: 80px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px !important; }
+          .book-name { font-size: 9px !important; max-width: 50px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+          .stat-badge { padding: 2px 4px !important; font-size: 8px !important; }
+          .text-sm-mobile { font-size: 10px !important; }
+          .ev-bar { display: none !important; }
+          .ev-text { font-size: 11px !important; }
+          table { min-width: 100% !important; }
+          td { white-space: nowrap; }
+        }
+      `}</style>
       <div style={{ position: "relative", zIndex: 1 }}>
 
         {/* HEADER */}
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 28px", borderBottom: `1px solid ${C.border}`, background: "rgba(8,12,16,0.94)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 100 }}>
+        <div className="app-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${C.border}`, background: "rgba(8,12,16,0.94)", backdropFilter: "blur(10px)", position: "sticky", top: 0, zIndex: 100 }}>
           <div>
-            <div style={{ ...mono, fontSize: 34, fontWeight: 900, letterSpacing: 6, color: C.accent, textShadow: `0 0 28px rgba(0,229,255,0.4)`, lineHeight: 1 }}>EDGE</div>
+            <div style={{ ...mono, fontSize: 34, fontWeight: 900, letterSpacing: 6, color: C.accent, textShadow: `0 0 28px rgba(0,229,255,0.4)`, lineHeight: 1 }}>DEGEN Tool</div>
             <div style={{ ...mono, fontSize: 10, letterSpacing: 3, color: C.text, opacity: 0.3 }}>NBA PROP FINDER · LIVE ODDS</div>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 24, ...mono, fontSize: 11 }}>
-            {/* API call counter */}
-            <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: "8px 14px", display: "flex", flexDirection: "column", alignItems: "center", gap: 2 }}>
-              <div style={{ fontSize: 9, letterSpacing: 2, color: C.muted }}>CALLS REMAINING</div>
-              <div style={{ fontSize: 22, fontWeight: 900, color: callsLeftColor, letterSpacing: 2, lineHeight: 1 }}>
-                {callsLeft === null ? "—" : callsLeft}
-              </div>
-              <div style={{ fontSize: 9, color: C.muted }}>of 500 free</div>
-            </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 4, color: C.muted, fontSize: 10 }}>
               <span><span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", marginRight: 6, background: loaded ? C.positive : C.muted, boxShadow: loaded ? `0 0 8px ${C.positive}` : "none" }} />{loading ? loadingMsg.split("…")[0] : loaded ? "LIVE DATA" : "READY"}</span>
               {lastUpdated && <span style={{ opacity: 0.5 }}>{lastUpdated}</span>}
+              <span style={{ color: teamDefSource === "LIVE" ? C.positive : C.muted }}>DEF DATA: {teamDefSource}</span>
             </div>
           </div>
         </div>
 
-        <div style={{ padding: "22px 28px" }}>
+        <div className="app-body">
 
           {/* CONFIG PANEL */}
-          <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: "18px 22px", marginBottom: 18, position: "relative", overflow: "hidden" }}>
+          <div className="config-panel" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, marginBottom: 18, position: "relative", overflow: "hidden" }}>
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,${C.accent},transparent)` }} />
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginBottom: 14 }}>
+            <div className="config-grid">
               {[
                 { icon: "📡", label: "DATA SOURCE", value: "The Odds API · DraftKings · FanDuel · BetMGM" },
-                { icon: "🛡", label: "ADJ: DEFENSE", value: `Opp def rating vs league avg (${LEAGUE_AVG_DEF_RTG})` },
-                { icon: "⚡", label: "ADJ: PACE + H/A", value: `Game pace · Home +2.5pts, Away −2.5pts` },
+                { icon: "🛡", label: "ADJ: DEFENSE", value: `Opp def rating via official NBA proxy (L10)` },
+                { icon: "⚡", label: "ADJ: PACE", value: `Game pace multiplier applied to EV` },
               ].map(item => (
                 <div key={item.label} style={{ background: C.bg, border: `1px solid ${C.border}`, borderRadius: 2, padding: "10px 12px" }}>
                   <div style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.accent, marginBottom: 3 }}>{item.icon} {item.label}</div>
@@ -384,16 +443,9 @@ export default function App() {
               ))}
             </div>
 
-            {/* Call budget warning */}
-            {callsLeft !== null && callsLeft < 100 && (
-              <div style={{ background: "rgba(255,61,113,0.08)", border: `1px solid rgba(255,61,113,0.3)`, borderRadius: 2, padding: "8px 12px", marginBottom: 12, ...mono, fontSize: 10, color: C.negative }}>
-                ⚠ LOW CALL BUDGET — {callsLeft} calls remaining. Each fetch uses ~{events.length + 1 || 11} calls. Cache is active for this session.
-              </div>
-            )}
-
             <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
               <div style={{ ...mono, fontSize: 10, color: C.muted, flex: 1 }}>
-                {loaded ? `${events.length} games · ${props.length} raw props · ~${events.length + 1} calls per fetch · cached this session` : `~${1} call for events + 1 per game on slate`}
+                {loaded ? `${events.length} games · ${props.length} raw props · cached this session` : `Ready`}
               </div>
               <button onClick={() => setShowAdj(a => !a)} style={{ background: "transparent", border: `1px solid ${C.border}`, color: C.muted, ...mono, fontSize: 10, letterSpacing: 2, padding: "6px 12px", borderRadius: 2, cursor: "pointer" }}>
                 {showAdj ? "HIDE ADJ" : "SHOW ADJ"}
@@ -491,31 +543,31 @@ export default function App() {
             )}
             {loaded && !loading && tableRows.length > 0 && (() => {
               const cols = [
-                { key: "player",    label: "PLAYER"    },
-                { key: "market",    label: "STAT"      },
-                { key: "direction", label: "DIR"       },
-                { key: "line",      label: "LINE"      },
-                { key: "bookOdds",  label: "ODDS"      },
-                { key: "bookmaker", label: "BOOK"      },
-                { key: "homeTeam",  label: "MATCHUP"   },
+                { key: "player",    label: "PLAYER" },
+                { key: "market",    label: "STAT" },
+                { key: "direction", label: "DIR" },
+                { key: "ev",        label: "EV%" },
+                { key: "line",      label: "LINE" },
+                { key: "adjLine",   label: "PROJ" },
+                { key: "bookOdds",  label: "ODDS" },
+                { key: "bookmaker", label: "BOOK" },
+                { key: "homeTeam",  label: "MATCHUP" },
                 ...(showAdj ? [
-                  { key: "adjLine",  label: "ADJ LINE" },
-                  { key: "defGrade", label: "DEF"      },
-                  { key: "gamePace", label: "PACE"     },
+                  { key: "defGrade", label: "DEF" },
+                  { key: "gamePace", label: "PACE" },
                 ] : [
-                  { key: "defGrade", label: "DEF"      },
+                  { key: "defGrade", label: "DEF" },
                 ]),
-                { key: "modelProb", label: "MODEL%"   },
-                { key: "ev",        label: "EV%"       },
+                { key: "modelProb", label: "MODEL%" },
               ];
 
               return (
-                <div style={{ overflowX: "auto" }}>
+                <div className="table-container">
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
                     <thead>
                       <tr style={{ background: C.surface2, borderBottom: `1px solid ${C.border}` }}>
                         {cols.map(col => (
-                          <th key={col.key} onClick={() => handleSort(col.key)} style={{ padding: "10px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: sortCol===col.key ? C.accent : C.muted }}>
+                          <th key={col.key} className="mobile-head" onClick={() => handleSort(col.key)} style={{ padding: "10px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: sortCol===col.key ? C.accent : C.muted }}>
                             {col.label} <span style={{ opacity: sortCol===col.key ? 1 : 0.4 }}>{sortCol===col.key ? (sortAsc ? "↑" : "↓") : "↕"}</span>
                           </th>
                         ))}
@@ -531,54 +583,48 @@ export default function App() {
 
                         return (
                           <tr key={i} style={{ borderBottom: `1px solid rgba(30,45,61,0.5)`, background: i%2===0 ? "transparent" : "rgba(20,28,36,0.3)" }}>
-                            <td style={{ padding: "10px 12px" }}>
-                              <div style={{ fontWeight: 500, fontSize: 13 }}>{r.player}</div>
+                            <td className="mobile-pad" style={{ padding: "10px 12px" }}>
+                              <div className="player-name" style={{ fontWeight: 500, fontSize: 13 }}>{r.player}</div>
                             </td>
-                            <td style={{ padding: "10px 12px" }}>
-                              <span style={{ background: C.surface2, border: `1px solid ${C.border}`, padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, color: C.neutral }}>{r.market}</span>
+                            <td className="mobile-pad" style={{ padding: "10px 12px" }}>
+                              <span className="stat-badge" style={{ background: C.surface2, border: `1px solid ${C.border}`, padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, color: C.neutral }}>{r.market}</span>
                             </td>
-                            <td style={{ padding: "10px 12px" }}>
-                              <span style={{ padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, fontWeight: 600, background: r.direction==="Over" ? "rgba(163,255,87,0.1)" : "rgba(255,61,113,0.1)", color: r.direction==="Over" ? C.positive : C.negative, border: `1px solid ${r.direction==="Over" ? "rgba(163,255,87,0.2)" : "rgba(255,61,113,0.2)"}` }}>
+                            <td className="mobile-pad" style={{ padding: "10px 12px" }}>
+                              <span className="stat-badge" style={{ padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, fontWeight: 600, background: r.direction==="Over" ? "rgba(163,255,87,0.1)" : "rgba(255,61,113,0.1)", color: r.direction==="Over" ? C.positive : C.negative, border: `1px solid ${r.direction==="Over" ? "rgba(163,255,87,0.2)" : "rgba(255,61,113,0.2)"}` }}>
                                 {r.direction.toUpperCase()}
                               </span>
                             </td>
-                            <td style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>{r.line}</td>
-                            <td style={{ padding: "10px 12px", ...mono, fontSize: 12, color: r.bookOdds > 0 ? C.positive : C.negative }}>{price}</td>
-                            <td style={{ padding: "10px 12px", ...mono, fontSize: 10, color: C.muted }}>{r.bookmaker}</td>
-                            <td style={{ padding: "10px 12px" }}>
+                            <td className="mobile-pad" style={{ padding: "10px 12px" }}>
+                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                                <span className="ev-text" style={{ ...mono, fontSize: 13, fontWeight: 600, color: evColor }}>
+                                  {evPct > 0 ? "+" : ""}{evPct}<span style={{ color: C.muted }}>%</span>
+                                </span>
+                                <div className="ev-bar" style={{ height: 3, width: barW, background: r.ev > 0 ? C.positive : C.negative }} />
+                              </div>
+                            </td>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>{r.line}</td>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12, fontWeight: 700, color: C.accent }}>{r.adjLine?.toFixed(1)}</td>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12, color: r.bookOdds > 0 ? C.positive : C.negative }}>{price}</td>
+                            <td className="mobile-pad book-name" style={{ padding: "10px 12px", ...mono, fontSize: 10, color: C.muted }}>
+                              {r.bookmaker === "DraftKings" ? "DK" : r.bookmaker === "FanDuel" ? "FD" : r.bookmaker === "BetMGM" ? "MGM" : r.bookmaker}
+                            </td>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px" }}>
                               <div style={{ ...mono, fontSize: 10, color: C.muted }}>
                                 {r.awayAbbr} <span style={{ color: C.border }}>@</span> {r.homeAbbr}
                               </div>
                             </td>
-                            {showAdj && (
-                              <>
-                                <td style={{ padding: "10px 12px", ...mono, fontSize: 11 }}>{r.adjLine}</td>
-                              </>
-                            )}
-                            <td style={{ padding: "10px 12px" }}>
-                              <span style={{ ...mono, fontSize: 9, color: DEF_GRADE_COLOR[r.defGrade], background: `${DEF_GRADE_COLOR[r.defGrade]}18`, border: `1px solid ${DEF_GRADE_COLOR[r.defGrade]}40`, padding: "2px 7px", borderRadius: 2 }}>
+                            <td className="mobile-pad" style={{ padding: "10px 12px" }}>
+                              <span className="stat-badge" style={{ ...mono, fontSize: 9, color: DEF_GRADE_COLOR[r.defGrade], background: `${DEF_GRADE_COLOR[r.defGrade]}18`, border: `1px solid ${DEF_GRADE_COLOR[r.defGrade]}40`, padding: "2px 7px", borderRadius: 2 }}>
                                 {r.defGrade}
                               </span>
-                              <div style={{ ...mono, fontSize: 8, color: C.muted, marginTop: 2 }}>{r.defRtg?.toFixed(1)}</div>
                             </td>
                             {showAdj && (
-                              <td style={{ padding: "10px 12px" }}>
+                              <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px" }}>
                                 <div style={{ ...mono, fontSize: 11 }}>{r.gamePace}</div>
-                                <div style={{ ...mono, fontSize: 9, color: r.paceMult > 1 ? C.positive : C.negative }}>
-                                  {r.paceMult > 1 ? "▲" : "▼"}{((r.paceMult-1)*100).toFixed(1)}%
-                                </div>
                               </td>
                             )}
-                            <td style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>
-                              {(r.modelProb * 100).toFixed(1)}<span style={{ color: C.muted }}>%</span>
-                            </td>
-                            <td style={{ padding: "10px 12px" }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                                <span style={{ ...mono, fontSize: 13, fontWeight: 600, color: evColor }}>
-                                  {evPct > 0 ? "+" : ""}{evPct}<span style={{ color: C.muted }}>%</span>
-                                </span>
-                                <div style={{ height: 3, width: barW, background: r.ev > 0 ? C.positive : C.negative }} />
-                              </div>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>
+                              {(r.modelProb * 100).toFixed(0)}<span style={{ color: C.muted }}>%</span>
                             </td>
                           </tr>
                         );
