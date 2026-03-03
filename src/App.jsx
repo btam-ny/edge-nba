@@ -639,7 +639,13 @@ export default function App() {
                   { key: "defGrade", label: "DEF" },
                 ]),
                 { key: "modelProb", label: "MODEL%" },
+              ];
 
+              return (
+                <div className="table-container">
+                  <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                    <thead>
+                      <tr style={{ background: C.surface2, borderBottom: `1px solid ${C.border}` }}>
                         {cols.map(col => (
                           <th key={col.key} className="mobile-head" onClick={() => handleSort(col.key)} style={{ padding: "10px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: sortCol===col.key ? C.accent : C.muted }}>
                             {col.label} <span style={{ opacity: sortCol===col.key ? 1 : 0.4 }}>{sortCol===col.key ? (sortAsc ? "↑" : "↓") : "↕"}</span>
