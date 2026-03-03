@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "chmod -R +x node_modules/.bin/ || true",
     "build": "vite build",
     "preview": "vite preview"
   },
