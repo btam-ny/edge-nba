@@ -240,12 +240,12 @@ const STAT_FILTERS = ["ALL", "PTS", "REB", "AST", "3PM"];
 const mono = { fontFamily: "monospace" };
 
 export default function App() {
-  const [events,      setEvents]      = useState([]);
-  const [props,       setProps]       = useState([]);
+  const [events,      setEvents]      = useState(() => { try { return JSON.parse(localStorage.getItem('edge_events')) || []; } catch { return []; } });
+  const [props,       setProps]       = useState(() => { try { return JSON.parse(localStorage.getItem('edge_props')) || []; } catch { return []; } });
   const [loading,     setLoading]     = useState(false);
   const [loadingMsg,  setLoadingMsg]  = useState("");
   const [error,       setError]       = useState(null);
-  const [lastUpdated, setLastUpdated] = useState("");
+  const [lastUpdated, setLastUpdated] = useState(() => localStorage.getItem('edge_updated') || "");
   const [statFilter,  setStatFilter]  = useState("ALL");
   const [dirFilter,   setDirFilter]   = useState("ALL");
   const [evMin,       setEvMin]       = useState(-20);
@@ -257,6 +257,17 @@ export default function App() {
   const [teamDefSource, setTeamDefSource] = useState("STATIC");
   const [injuries,      setInjuries]      = useState({});
   const [l10Stats,      setL10Stats]      = useState({});
+
+  useEffect(() => {
+    // Save to local storage whenever our core data updates
+    try {
+      if (events.length > 0) localStorage.setItem("edge_events", JSON.stringify(events));
+      if (props.length > 0) localStorage.setItem("edge_props", JSON.stringify(props));
+      if (lastUpdated) localStorage.setItem("edge_updated", lastUpdated);
+    } catch (err) {
+      console.warn("Storage quota exceeded", err);
+    }
+  }, [events, props, lastUpdated]);
 
   useEffect(() => {
     // 1. Fetch Defense
