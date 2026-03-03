@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef } from "react";
 
 // ─── CONFIG ────────────────────────────────────────────────────────────────
-const ODDS_API_KEY  = "21b5a430e3451a9743da697b7fc88a32";
+const ODDS_API_KEY  = "33f7c85a41bd0aefe34d0c4e5fac6021";
 const ODDS_BASE     = "https://api.the-odds-api.com/v4";
 const SPORT         = "basketball_nba";
 const REGIONS       = "us";
