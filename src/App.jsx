@@ -278,6 +278,7 @@ const C = {
 };
 const gridBg = `repeating-linear-gradient(rgba(0,229,255,0.03) 0,rgba(0,229,255,0.03) 1px,transparent 1px,transparent 40px),repeating-linear-gradient(90deg,rgba(0,229,255,0.03) 0,rgba(0,229,255,0.03) 1px,transparent 1px,transparent 40px)`;
 const STAT_FILTERS = ["ALL", "PTS", "REB", "AST", "3PM"];
+const BOOK_FILTERS = ["ALL", "DraftKings", "FanDuel"];
 const mono = { fontFamily: "monospace" };
 
 export default function App() {
@@ -289,6 +290,7 @@ export default function App() {
   const [lastUpdated, setLastUpdated] = useState(() => localStorage.getItem('edge_updated') || "");
   const [statFilter,  setStatFilter]  = useState("ALL");
   const [dirFilter,   setDirFilter]   = useState("ALL");
+  const [bookFilter,  setBookFilter]  = useState("ALL");
   const [evMin,       setEvMin]       = useState(-20);
   const [sortCol,     setSortCol]     = useState("evOver");
   const [sortAsc,     setSortAsc]     = useState(false);
@@ -436,13 +438,14 @@ export default function App() {
     return expanded
       .filter(r => statFilter === "ALL" || r.market === statFilter)
       .filter(r => dirFilter  === "ALL" || r.direction === dirFilter)
-      .filter(r => r.ev * 100 >= evMin)
+        .filter(r => bookFilter === "ALL" || r.bookmaker.toLowerCase() === bookFilter.toLowerCase())
+        .filter(r => r.ev * 100 >= evMin)
       .sort((a, b) => {
         const va = a[sortCol], vb = b[sortCol];
         if (typeof va === "string") return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
         return sortAsc ? va - vb : vb - va;
       });
-  }, [props, statFilter, dirFilter, evMin, sortCol, sortAsc]);
+}, [props, statFilter, dirFilter, bookFilter, evMin, sortCol, sortAsc]);
 
   const posCount = tableRows.filter(r => r.ev > 0).length;
   const bestEv   = tableRows.length ? (tableRows.sort((a,b) => b.ev - a.ev)[0].ev * 100).toFixed(1) : "—";
@@ -584,8 +587,12 @@ export default function App() {
                 {["ALL","Over","Under"].map(d => (
                   <button key={d} onClick={() => setDirFilter(d)} style={{ ...mono, fontSize: 9, letterSpacing: 1, padding: "3px 8px", borderRadius: 2, border: `1px solid ${dirFilter===d ? C.accent : C.border}`, background: dirFilter===d ? C.accent : "transparent", color: dirFilter===d ? C.bg : C.muted, cursor: "pointer" }}>{d.toUpperCase()}</button>
                 ))}
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: "5px 10px" }}>
+              </div>                <div style={{ display: "flex", alignItems: "center", gap: 6, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: "5px 10px" }}>
+                  <span style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.muted }}>BOOK</span>
+                  {BOOK_FILTERS.map(b => (
+                    <button key={b} onClick={() => setBookFilter(b)} style={{ ...mono, fontSize: 9, letterSpacing: 1, padding: "3px 8px", borderRadius: 2, border: `1px solid ${bookFilter===b ? C.accent : C.border}`, background: bookFilter===b ? C.accent : "transparent", color: bookFilter===b ? C.bg : C.muted, cursor: "pointer" }}>{b.toUpperCase()}</button>
+                  ))}
+                </div>              <div style={{ display: "flex", alignItems: "center", gap: 8, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: "5px 10px" }}>
                 <span style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.muted }}>MIN EV%</span>
                 <input type="range" min={-30} max={30} value={evMin} onChange={e => setEvMin(+e.target.value)} style={{ width: 80, accentColor: C.accent }} />
                 <span style={{ ...mono, fontSize: 10, color: C.accent, minWidth: 32 }}>{evMin > 0 ? "+" : ""}{evMin}%</span>
