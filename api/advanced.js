@@ -54,15 +54,15 @@ export default async function handler(_req, res) {
         let teamPts = 0, teamFga = 0, teamFta = 0, teamOreb = 0, teamTov = 0;
 
         for (const statsGroup of (teamBlock.statistics || [])) {
-          const keys     = statsGroup.keys || [];
-          const ptIdx    = keys.indexOf("PTS");
-          const rebIdx   = keys.indexOf("REB");
-          const astIdx   = keys.indexOf("AST");
-          const threeIdx = keys.indexOf("3PT");
-          const fgIdx    = keys.indexOf("FG");
-          const ftIdx    = keys.indexOf("FT");
-          const orebIdx  = keys.indexOf("OREB");
-          const tovIdx   = keys.indexOf("TO");
+          const keys     = statsGroup.keys || statsGroup.statKeys || [];
+          const ptIdx    = keys.indexOf("points");
+          const rebIdx   = keys.indexOf("rebounds");
+          const astIdx   = keys.indexOf("assists");
+          const threeIdx = keys.indexOf("threePointFieldGoalsMade-threePointFieldGoalsAttempted");
+          const fgIdx    = keys.indexOf("fieldGoalsMade-fieldGoalsAttempted");
+          const ftIdx    = keys.indexOf("freeThrowsMade-freeThrowsAttempted");
+          const orebIdx  = keys.indexOf("offensiveRebounds");
+          const tovIdx   = keys.indexOf("turnovers");
 
           for (const ath of (statsGroup.athletes || [])) {
             const name  = ath.athlete?.displayName;
