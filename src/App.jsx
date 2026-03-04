@@ -84,7 +84,9 @@ function calcEV(modelProb, bookOdds, oppOdds) {
   const rawProb  = americanToProb(bookOdds);
   const rawOpp   = americanToProb(oppOdds);
   const trueProb = rawProb / (rawProb + rawOpp);
-  return (modelProb - trueProb) / modelProb;
+  // Probability edge: how much better our model is vs the vig-removed price.
+  // Dividing by modelProb inflates small edges — raw difference is more honest.
+  return modelProb - trueProb;
 }
 
 // ─── PARSE ODDS API RESPONSE into prop rows ────────────────────────────────
@@ -162,43 +164,45 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
   return props.map(prop => {
     const { player, line, overOdds, underOdds, homeAbbr, awayAbbr, market } = prop;
 
-    // Advanced Data links player to exactly 1 team
+    // Advanced Data links player to exactly 1 team.
+    // Note: players is always {} (stats.nba.com blocked from cloud IPs),
+    // so playerTeam is always null. Guessing awayAbbr caused every player
+    // to use the home team's defense as oppDef — inflating EV for entire games
+    // whenever the home team had a bad defense.
     const playerAdv = advancedData.players[player] || { team: null, usage: 0 };
-    let playerTeam = playerAdv.team;
-    
-    // Fallback if player team not matched exactly (common with suffixes Jr/Sr/III)
-    if (!playerTeam) {
-      // Just guess based on the 2 teams in the game
-      playerTeam = awayAbbr; 
-    }
+    const playerTeam = playerAdv.team; // null when stats unavailable
 
-    const isHome = (playerTeam === homeAbbr);
-    const oppAbbr = isHome ? awayAbbr : homeAbbr;
-    
-    const oppDef   = teamDef[oppAbbr] || { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
-    const homeDef  = teamDef[homeAbbr] || { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
+    const isHome  = playerTeam ? (playerTeam === homeAbbr) : null;
+    const oppAbbr = isHome === true ? awayAbbr : isHome === false ? homeAbbr : null;
 
-    // 1. Position/Defensive adjustment
-    const defDiff     = oppDef.defRtg - leagueAvgDefRtg;
-    const defScale    = market === "3PM" ? 0.015 : market === "REB" ? 0.008 : market === "AST" ? 0.008 : 0.012;
-    let   defMult     = 1 + (defDiff / 5) * defScale;
+    // When team unknown, fall back to league-average defense → defMult stays 1.0
+    const oppDef  = (oppAbbr && teamDef[oppAbbr])
+      ? teamDef[oppAbbr]
+      : { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
+    const homeDef = teamDef[homeAbbr] || { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
+    const awayDef = teamDef[awayAbbr] || { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
 
-    // 2. Pace adjustment
-    const gamePace    = (homeDef.pace + oppDef.pace) / 2;
-    let   paceMult    = leagueAvgPace > 0
+    // 1. Defensive adjustment (= 1.0 when team unknown, oppDef = league avg)
+    const defDiff  = oppDef.defRtg - leagueAvgDefRtg;
+    const defScale = market === "3PM" ? 0.015 : market === "REB" ? 0.008 : market === "AST" ? 0.008 : 0.012;
+    let   defMult  = 1 + (defDiff / 5) * defScale;
+
+    // 2. Pace adjustment (game-level — average both teams' pace)
+    const gamePace = (homeDef.pace + awayDef.pace) / 2;
+    let   paceMult = leagueAvgPace > 0
       ? 1 + ((gamePace - leagueAvgPace) / leagueAvgPace) * 0.4
       : 1.0;
 
-    // 3. Home/Away Role Player Split (3PM gets major boost at home for non-stars)
+    // 3. Home/Away Role Player Split — only when team is known
     let homeRoadMult = 1.0;
-    if (isHome && market === "3PM" && line < 18.5) {
-      homeRoadMult = 1.05;
-    } else if (!isHome && market === "3PM" && line < 18.5) {
-      homeRoadMult = 0.95;
+    if (isHome !== null && market === "3PM" && line < 18.5) {
+      homeRoadMult = isHome ? 1.05 : 0.95;
     }
 
     // 4. Back-to-Back Rest Penalty
-    const isB2B = advancedData.b2bTeams.includes(playerTeam);
+    const isB2B = playerTeam
+      ? advancedData.b2bTeams.includes(playerTeam)
+      : advancedData.b2bTeams.includes(homeAbbr) || advancedData.b2bTeams.includes(awayAbbr);
     let b2bMult = 1.0;
     if (isB2B) {
       if (market === "PTS" || market === "AST") b2bMult = 0.97;
@@ -246,7 +250,7 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
       finalMult:  +finalMult.toFixed(3),
       isB2B,
       usageBump:  usageMult > 1.0,
-      isHome,
+      isHome: isHome ?? false,
       modelOver:  +modelOver.toFixed(4),
       modelUnder: +modelUnder.toFixed(4),
       evOver:     +evOver.toFixed(4),
