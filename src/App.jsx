@@ -146,8 +146,9 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
   const leagueAvgDefRtg = defVals.length
     ? defVals.reduce((s, t) => s + t.defRtg, 0) / defVals.length
     : LEAGUE_AVG_DEF_RTG;
-  const leagueAvgPace = defVals.length
-    ? defVals.reduce((s, t) => s + t.pace,   0) / defVals.length
+  const validPaces = defVals.filter(t => t.pace > 0);
+  const leagueAvgPace = validPaces.length
+    ? validPaces.reduce((s, t) => s + t.pace, 0) / validPaces.length
     : LEAGUE_AVG_PACE;
 
   // Pre-calculate Missing Star Usage bump per team
@@ -184,7 +185,9 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
 
     // 2. Pace adjustment
     const gamePace    = (homeDef.pace + oppDef.pace) / 2;
-    let   paceMult    = 1 + ((gamePace - leagueAvgPace) / leagueAvgPace) * 0.4;
+    let   paceMult    = leagueAvgPace > 0
+      ? 1 + ((gamePace - leagueAvgPace) / leagueAvgPace) * 0.4
+      : 1.0;
 
     // 3. Home/Away Role Player Split (3PM gets major boost at home for non-stars)
     let homeRoadMult = 1.0;
