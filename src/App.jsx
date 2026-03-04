@@ -49,7 +49,6 @@ const MARKET_LABEL = {
 };
 
 // ─── MATH ──────────────────────────────────────────────────────────────────
-const VIG                = 1.06775067750678;
 const LEAGUE_AVG_DEF_RTG = 113.2;
 const LEAGUE_AVG_PACE    = 98.4;
 
@@ -80,10 +79,11 @@ function americanToProb(american) {
   return 100 / (american + 100);
 }
 
-function calcEV(modelProb, bookOdds) {
-  // True probability after removing vig
+function calcEV(modelProb, bookOdds, oppOdds) {
+  // Remove vig by normalizing both sides so they sum to 1
   const rawProb  = americanToProb(bookOdds);
-  const trueProb = rawProb / VIG;
+  const rawOpp   = americanToProb(oppOdds);
+  const trueProb = rawProb / (rawProb + rawOpp);
   return (modelProb - trueProb) / modelProb;
 }
 
@@ -140,6 +140,16 @@ function parseEventProps(event) {
 
 // ─── APPLY MODEL ADJUSTMENTS + COMPUTE EV ─────────────────────────────────
 function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
+  // Compute league averages from loaded data so adjustments are always centered,
+  // regardless of whether static or live defense data is in use.
+  const defVals = Object.values(teamDef);
+  const leagueAvgDefRtg = defVals.length
+    ? defVals.reduce((s, t) => s + t.defRtg, 0) / defVals.length
+    : LEAGUE_AVG_DEF_RTG;
+  const leagueAvgPace = defVals.length
+    ? defVals.reduce((s, t) => s + t.pace,   0) / defVals.length
+    : LEAGUE_AVG_PACE;
+
   // Pre-calculate Missing Star Usage bump per team
   const bumpPerTeam = {};
   for (const [playerName, stats] of Object.entries(advancedData.players)) {
@@ -164,17 +174,17 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
     const isHome = (playerTeam === homeAbbr);
     const oppAbbr = isHome ? awayAbbr : homeAbbr;
     
-    const oppDef   = teamDef[oppAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
-    const homeDef  = teamDef[homeAbbr] || { defRtg: LEAGUE_AVG_DEF_RTG, pace: LEAGUE_AVG_PACE };
+    const oppDef   = teamDef[oppAbbr] || { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
+    const homeDef  = teamDef[homeAbbr] || { defRtg: leagueAvgDefRtg, pace: leagueAvgPace };
 
     // 1. Position/Defensive adjustment
-    const defDiff     = oppDef.defRtg - LEAGUE_AVG_DEF_RTG;
+    const defDiff     = oppDef.defRtg - leagueAvgDefRtg;
     const defScale    = market === "3PM" ? 0.015 : market === "REB" ? 0.008 : market === "AST" ? 0.008 : 0.012;
     let   defMult     = 1 + (defDiff / 5) * defScale;
 
     // 2. Pace adjustment
     const gamePace    = (homeDef.pace + oppDef.pace) / 2;
-    let   paceMult    = 1 + ((gamePace - LEAGUE_AVG_PACE) / LEAGUE_AVG_PACE) * 0.4;
+    let   paceMult    = 1 + ((gamePace - leagueAvgPace) / leagueAvgPace) * 0.4;
 
     // 3. Home/Away Role Player Split (3PM gets major boost at home for non-stars)
     let homeRoadMult = 1.0;
@@ -207,9 +217,10 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
     // Adjusted expected value (book line as baseline)
     const adjLine = (line * finalMult);
 
-    // Std dev estimate: tighter distributions lead to less extreme outlier probabilities
+    // Std dev based on the book line (not adjLine) so the spread stays neutral
+    // and only the center shifts — avoids compounding the under bias
     const stdPcts     = { PTS: 0.28, REB: 0.32, AST: 0.35, "3PM": 0.45 };
-    const adjStd      = adjLine * (stdPcts[market] || 0.30);
+    const adjStd      = line * (stdPcts[market] || 0.30);
 
     // Model probability for over/under
     const zOver       = (line + 0.5 - adjLine) / adjStd;
@@ -217,8 +228,8 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
     const modelOver   = 1 - normCDF(zOver);
     const modelUnder  = normCDF(zUnder);
 
-    const evOver      = calcEV(modelOver,  overOdds);
-    const evUnder     = calcEV(modelUnder, underOdds);
+    const evOver      = calcEV(modelOver,  overOdds,  underOdds);
+    const evUnder     = calcEV(modelUnder, underOdds, overOdds);
 
     const defGrade    = getDefGrade(oppDef.defRtg);
 
@@ -292,14 +303,16 @@ export default function App() {
   const [dirFilter,   setDirFilter]   = useState("ALL");
   const [bookFilter,  setBookFilter]  = useState("ALL");
   const [evMin,       setEvMin]       = useState(-20);
-  const [sortCol,     setSortCol]     = useState("evOver");
-  const [sortAsc,     setSortAsc]     = useState(false);
   const [showAdj,     setShowAdj]     = useState(false);
   const cache = useRef({});
   const [teamDef,       setTeamDef]       = useState(TEAM_DEF_STATIC);
   const [teamDefSource, setTeamDefSource] = useState("STATIC");
   const [injuries,      setInjuries]      = useState({});
   const [advancedData,  setAdvancedData]  = useState({ players: {}, b2bTeams: [] });
+  const [last10Data,    setLast10Data]    = useState({});
+  const [activeTab,       setActiveTab]       = useState("props");
+  const [trackerPlays,    setTrackerPlays]    = useState(() => { try { return JSON.parse(localStorage.getItem('edge_tracker')) || []; } catch { return []; } });
+  const [checkingResults, setCheckingResults] = useState(false);
 
   useEffect(() => {
     // Save to local storage whenever our core data updates
@@ -351,6 +364,14 @@ export default function App() {
         if (data?.players) setAdvancedData(data);
       })
       .catch(err => console.error("Could not fetch advanced data", err));
+
+    // 5. Fetch Last 10 Games averages
+    fetch("/api/last10")
+      .then(res => res.json())
+      .then(data => {
+        if (data && !data.error) setLast10Data(data);
+      })
+      .catch(err => console.error("Could not fetch last 10 data", err));
   }, []);
 
   // ── API helpers ──────────────────────────────────────────────────────────
@@ -420,6 +441,37 @@ export default function App() {
       setProps(withEV);
       setLastUpdated("UPDATED " + new Date().toLocaleTimeString());
 
+      // Auto-save top 10 EV plays for today (once per day)
+      const today = new Date().toISOString().split("T")[0];
+      setTrackerPlays(prev => {
+        if (prev.some(p => p.date === today)) return prev;
+        const top10 = withEV
+          .flatMap(p => [
+            { ...p, direction: "Over",  ev: p.evOver,  bookOdds: p.overOdds  },
+            { ...p, direction: "Under", ev: p.evUnder, bookOdds: p.underOdds },
+          ])
+          .sort((a, b) => b.ev - a.ev)
+          .slice(0, 10)
+          .map(p => ({
+            id:        `${today}_${p.player}_${p.market}_${p.direction}`,
+            date:      today,
+            player:    p.player,
+            market:    p.market,
+            direction: p.direction,
+            line:      p.line,
+            ev:        p.ev,
+            bookOdds:  p.bookOdds,
+            bookmaker: p.bookmaker,
+            awayAbbr:  p.awayAbbr,
+            homeAbbr:  p.homeAbbr,
+            result:    null,
+            actual:    null,
+          }));
+        const updated = [...prev, ...top10];
+        try { localStorage.setItem('edge_tracker', JSON.stringify(updated)); } catch {}
+        return updated;
+      });
+
     } catch (err) {
       setError(err.message);
     } finally {
@@ -428,33 +480,96 @@ export default function App() {
     }
   }
 
+  // ── CHECK RESULTS via ESPN boxscores ─────────────────────────────────────
+  async function checkResults() {
+    setCheckingResults(true);
+    try {
+      const today   = new Date().toISOString().split("T")[0];
+      const pending = trackerPlays.filter(p => p.result === null && p.date < today);
+      if (!pending.length) return;
+
+      // { "YYYY-MM-DD_PlayerName": { PTS, REB, AST, "3PM" } }
+      const statsMap = {};
+      const dates    = [...new Set(pending.map(p => p.date))];
+
+      for (const date of dates) {
+        const dateStr = date.replace(/-/g, "");
+        const sbRes   = await fetch(
+          `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${dateStr}`
+        );
+        const sbData = await sbRes.json();
+
+        for (const event of (sbData.events || [])) {
+          if (!event.status?.type?.completed) continue;
+          const bsRes  = await fetch(
+            `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${event.id}`
+          );
+          const bsData = await bsRes.json();
+
+          for (const teamBlock of (bsData.boxscore?.players || [])) {
+            for (const statsGroup of (teamBlock.statistics || [])) {
+              const keys     = statsGroup.keys || [];
+              const ptIdx    = keys.indexOf("PTS");
+              const rebIdx   = keys.indexOf("REB");
+              const astIdx   = keys.indexOf("AST");
+              const threeIdx = keys.indexOf("3PT");
+
+              for (const ath of (statsGroup.athletes || [])) {
+                const name  = ath.athlete?.displayName;
+                const stats = ath.stats || [];
+                if (!name || !stats.length) continue;
+                statsMap[`${date}_${name}`] = {
+                  PTS:   parseFloat(stats[ptIdx])  || 0,
+                  REB:   parseFloat(stats[rebIdx]) || 0,
+                  AST:   parseFloat(stats[astIdx]) || 0,
+                  "3PM": parseInt((stats[threeIdx] || "0-0").split("-")[0]) || 0,
+                };
+              }
+            }
+          }
+        }
+      }
+
+      const updated = trackerPlays.map(play => {
+        if (play.result !== null || play.date >= today) return play;
+        const playerStats = statsMap[`${play.date}_${play.player}`];
+        if (!playerStats) return play;
+        const actual = playerStats[play.market];
+        if (actual === undefined) return play;
+        const hit = play.direction === "Over" ? actual > play.line : actual < play.line;
+        return { ...play, result: hit ? "HIT" : "MISS", actual };
+      });
+
+      setTrackerPlays(updated);
+      try { localStorage.setItem('edge_tracker', JSON.stringify(updated)); } catch {}
+    } catch (err) {
+      console.error("checkResults error", err);
+    } finally {
+      setCheckingResults(false);
+    }
+  }
+
   // ── FILTERED + SORTED TABLE DATA ─────────────────────────────────────────
   const tableRows = useMemo(() => {
-    const expanded = props.flatMap(p => [
-      { ...p, direction: "Over",  ev: p.evOver,  modelProb: p.modelOver,  bookOdds: p.overOdds  },
-      { ...p, direction: "Under", ev: p.evUnder, modelProb: p.modelUnder, bookOdds: p.underOdds },
-    ]);
+    const expanded = props.flatMap(p => {
+      const l10Avg = last10Data[p.player]?.[p.market] ?? null;
+      return [
+        { ...p, direction: "Over",  ev: p.evOver,  modelProb: p.modelOver,  bookOdds: p.overOdds,  l10Avg },
+        { ...p, direction: "Under", ev: p.evUnder, modelProb: p.modelUnder, bookOdds: p.underOdds, l10Avg },
+      ];
+    });
 
     return expanded
       .filter(r => statFilter === "ALL" || r.market === statFilter)
       .filter(r => dirFilter  === "ALL" || r.direction === dirFilter)
         .filter(r => bookFilter === "ALL" || r.bookmaker.toLowerCase() === bookFilter.toLowerCase())
         .filter(r => r.ev * 100 >= evMin)
-      .sort((a, b) => {
-        const va = a[sortCol], vb = b[sortCol];
-        if (typeof va === "string") return sortAsc ? va.localeCompare(vb) : vb.localeCompare(va);
-        return sortAsc ? va - vb : vb - va;
-      });
-}, [props, statFilter, dirFilter, bookFilter, evMin, sortCol, sortAsc]);
+      .sort((a, b) => b.ev - a.ev);
+}, [props, statFilter, dirFilter, bookFilter, evMin, last10Data]);
 
   const posCount = tableRows.filter(r => r.ev > 0).length;
-  const bestEv   = tableRows.length ? (tableRows.sort((a,b) => b.ev - a.ev)[0].ev * 100).toFixed(1) : "—";
+  const bestEv   = tableRows.length ? ([...tableRows].sort((a,b) => b.ev - a.ev)[0].ev * 100).toFixed(1) : "—";
   const avgEv    = tableRows.length ? (tableRows.reduce((s,r) => s + r.ev, 0) / tableRows.length * 100).toFixed(1) : "—";
-
-  function handleSort(col) {
-    if (sortCol === col) setSortAsc(a => !a);
-    else { setSortCol(col); setSortAsc(false); }
-  }
 
   const loaded = props.length > 0;
 
@@ -508,12 +623,26 @@ export default function App() {
 
         <div className="app-body">
 
+          {/* TABS */}
+          <div style={{ display: "flex", borderBottom: `1px solid ${C.border}`, marginBottom: 18 }}>
+            {[["props", "PROPS"], ["tracker", "TRACKER"]].map(([key, label]) => (
+              <button key={key} onClick={() => setActiveTab(key)} style={{ background: "transparent", border: "none", borderBottom: `2px solid ${activeTab === key ? C.accent : "transparent"}`, color: activeTab === key ? C.accent : C.muted, ...mono, fontSize: 11, letterSpacing: 3, padding: "8px 22px 10px", cursor: "pointer", marginBottom: -1 }}>
+                {label}
+                {key === "tracker" && trackerPlays.length > 0 && (
+                  <span style={{ marginLeft: 6, background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 2, padding: "1px 5px", fontSize: 9 }}>{trackerPlays.length}</span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {activeTab === "props" && <>
+
           {/* CONFIG PANEL */}
           <div className="config-panel" style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, marginBottom: 18, position: "relative", overflow: "hidden" }}>
             <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: `linear-gradient(90deg,${C.accent},transparent)` }} />
             <div className="config-grid">
               {[
-                { icon: "�", label: "DEF · PACE", value: "L10 Def proxy & aggregate game pace baseline" },
+                { icon: "📊", label: "DEF · PACE", value: "L10 Def proxy & aggregate game pace baseline" },
                 { icon: "🏠", label: "HOME SPLIT", value: "3PM volume & role-player momentum variance" },
                 { icon: "🏥", label: "USG BUMP", value: "Stars ruled OUT boost teammate projections" },
                 { icon: "🪫", label: "B2B REST", value: "Back-to-back rest penalties minus rebounding" },
@@ -629,12 +758,14 @@ export default function App() {
               </div>
             )}
             {loaded && !loading && tableRows.length > 0 && (() => {
+              const maxEV = Math.max(...tableRows.map(x => Math.abs(x.ev)));
               const cols = [
                 { key: "player",    label: "PLAYER" },
                 { key: "market",    label: "STAT" },
                 { key: "direction", label: "DIR" },
                 { key: "ev",        label: "EV%" },
                 { key: "line",      label: "LINE" },
+                { key: "l10Avg",    label: "L10" },
                 { key: "adjLine",   label: "PROJ" },
                 { key: "bookOdds",  label: "ODDS" },
                 { key: "bookmaker", label: "BOOK" },
@@ -654,8 +785,8 @@ export default function App() {
                     <thead>
                       <tr style={{ background: C.surface2, borderBottom: `1px solid ${C.border}` }}>
                         {cols.map(col => (
-                          <th key={col.key} className="mobile-head" onClick={() => handleSort(col.key)} style={{ padding: "10px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, cursor: "pointer", userSelect: "none", whiteSpace: "nowrap", color: sortCol===col.key ? C.accent : C.muted }}>
-                            {col.label} <span style={{ opacity: sortCol===col.key ? 1 : 0.4 }}>{sortCol===col.key ? (sortAsc ? "↑" : "↓") : "↕"}</span>
+                          <th key={col.key} className="mobile-head" style={{ padding: "10px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, whiteSpace: "nowrap", color: col.key === "ev" ? C.accent : C.muted }}>
+                            {col.label}{col.key === "ev" && " ↓"}
                           </th>
                         ))}
                       </tr>
@@ -664,7 +795,6 @@ export default function App() {
                       {tableRows.map((r, i) => {
                         const evPct   = (r.ev * 100).toFixed(1);
                         const evColor = r.ev > 0.05 ? C.positive : r.ev > 0 ? C.neutral : C.negative;
-                        const maxEV   = Math.max(...tableRows.map(x => Math.abs(x.ev)));
                         const barW    = Math.min(50, Math.abs(r.ev) / (maxEV || 1) * 50);
                         const price   = r.bookOdds > 0 ? `+${r.bookOdds}` : `${r.bookOdds}`;
                         
@@ -692,12 +822,15 @@ export default function App() {
                             <td className="mobile-pad" style={{ padding: "10px 12px" }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                                 <span className="ev-text" style={{ ...mono, fontSize: 13, fontWeight: 600, color: evColor }}>
-                                  {evPct > 0 ? "+" : ""}{evPct}<span style={{ color: C.muted }}>%</span>
+                                  {r.ev > 0 ? "+" : ""}{evPct}<span style={{ color: C.muted }}>%</span>
                                 </span>
                                 <div className="ev-bar" style={{ height: 3, width: barW, background: r.ev > 0 ? C.positive : C.negative }} />
                               </div>
                             </td>
                             <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12 }}>{r.line}</td>
+                            <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12, color: C.muted }}>
+                              {r.l10Avg != null ? r.l10Avg.toFixed(1) : "—"}
+                            </td>
                             <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12, fontWeight: 700, color: C.accent }}>{r.adjLine?.toFixed(1)}</td>
                             <td className="mobile-pad text-sm-mobile" style={{ padding: "10px 12px", ...mono, fontSize: 12, color: r.bookOdds > 0 ? C.positive : C.negative }}>{price}</td>
                             <td className="mobile-pad book-name" style={{ padding: "10px 12px", ...mono, fontSize: 10, color: C.muted }}>
@@ -731,6 +864,144 @@ export default function App() {
               );
             })()}
           </div>
+
+          </>}
+
+          {activeTab === "tracker" && (() => {
+            const today   = new Date().toISOString().split("T")[0];
+            const settled = trackerPlays.filter(p => p.result !== null);
+            const hits    = settled.filter(p => p.result === "HIT").length;
+            const misses  = settled.filter(p => p.result === "MISS").length;
+            const pending = trackerPlays.filter(p => p.result === null && p.date < today).length;
+            const hitRate = settled.length ? ((hits / settled.length) * 100).toFixed(0) : "—";
+            const byDate  = trackerPlays.reduce((acc, play) => {
+              if (!acc[play.date]) acc[play.date] = [];
+              acc[play.date].push(play);
+              return acc;
+            }, {});
+            const dates = Object.keys(byDate).sort((a, b) => b.localeCompare(a));
+
+            return (
+              <>
+                {/* TRACKER SUMMARY */}
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 1, background: C.border, border: `1px solid ${C.border}`, borderRadius: 2, marginBottom: 16, overflow: "hidden" }}>
+                  {[
+                    { label: "RECORD",   value: `${hits}-${misses}`,                           color: C.neutral  },
+                    { label: "HIT RATE", value: hitRate !== "—" ? hitRate + "%" : "—",         color: C.positive },
+                    { label: "PENDING",  value: pending,                                       color: C.accent   },
+                    { label: "TRACKED",  value: trackerPlays.length,                           color: C.muted    },
+                  ].map(cell => (
+                    <div key={cell.label} style={{ background: C.surface, padding: "12px 16px" }}>
+                      <div style={{ ...mono, fontSize: 9, letterSpacing: 2, color: C.muted, marginBottom: 3 }}>{cell.label}</div>
+                      <div style={{ ...mono, fontSize: 24, fontWeight: 900, letterSpacing: 2, color: cell.color, lineHeight: 1 }}>{cell.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* TRACKER ACTIONS */}
+                <div style={{ display: "flex", gap: 8, marginBottom: 16, alignItems: "center", flexWrap: "wrap" }}>
+                  <button
+                    onClick={checkResults}
+                    disabled={checkingResults || pending === 0}
+                    style={{ background: checkingResults || pending === 0 ? "transparent" : C.accent, color: checkingResults || pending === 0 ? C.muted : C.bg, border: `1px solid ${checkingResults || pending === 0 ? C.border : C.accent}`, borderRadius: 2, padding: "8px 20px", ...mono, fontSize: 11, fontWeight: 900, letterSpacing: 2, cursor: checkingResults || pending === 0 ? "not-allowed" : "pointer", whiteSpace: "nowrap" }}
+                  >
+                    {checkingResults ? "CHECKING…" : `CHECK RESULTS (${pending} PENDING)`}
+                  </button>
+                  <button
+                    onClick={() => { if (!window.confirm("Clear all tracked plays?")) return; setTrackerPlays([]); localStorage.removeItem("edge_tracker"); }}
+                    style={{ background: "transparent", border: `1px solid rgba(255,61,113,0.3)`, color: C.negative, borderRadius: 2, padding: "8px 14px", ...mono, fontSize: 10, letterSpacing: 2, cursor: "pointer" }}
+                  >
+                    CLEAR ALL
+                  </button>
+                  <span style={{ ...mono, fontSize: 9, color: C.muted, marginLeft: "auto", opacity: 0.6 }}>
+                    Top 10 EV plays auto-saved on each fetch · results via ESPN boxscores
+                  </span>
+                </div>
+
+                {/* PLAYS BY DATE */}
+                {trackerPlays.length === 0 ? (
+                  <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, padding: "80px 40px", textAlign: "center" }}>
+                    <div style={{ ...mono, fontSize: 40, color: C.border }}>◈</div>
+                    <div style={{ ...mono, fontSize: 14, letterSpacing: 4, color: C.muted, marginTop: 14 }}>NO PLAYS TRACKED YET</div>
+                    <div style={{ fontSize: 12, color: C.muted, marginTop: 8 }}>Go to PROPS, fetch live odds — top 10 EV plays are saved automatically.</div>
+                  </div>
+                ) : dates.map(date => {
+                  const plays       = byDate[date];
+                  const dateHits    = plays.filter(p => p.result === "HIT").length;
+                  const dateMisses  = plays.filter(p => p.result === "MISS").length;
+                  const datePending = plays.filter(p => p.result === null && date < today).length;
+                  const isToday     = date === today;
+                  return (
+                    <div key={date} style={{ marginBottom: 16 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                        <span style={{ ...mono, fontSize: 11, letterSpacing: 3, color: C.accent }}>{date}</span>
+                        {isToday    && <span style={{ ...mono, fontSize: 8, letterSpacing: 2, color: C.accent, background: "rgba(0,229,255,0.1)", border: `1px solid rgba(0,229,255,0.3)`, borderRadius: 2, padding: "1px 5px" }}>TODAY</span>}
+                        {dateHits   > 0 && <span style={{ ...mono, fontSize: 10, color: C.positive }}>{dateHits}W</span>}
+                        {dateMisses > 0 && <span style={{ ...mono, fontSize: 10, color: C.negative }}>{dateMisses}L</span>}
+                        {datePending > 0 && <span style={{ ...mono, fontSize: 10, color: C.muted }}>{datePending} pending</span>}
+                      </div>
+                      <div style={{ background: C.surface, border: `1px solid ${C.border}`, borderRadius: 2, overflow: "hidden" }}>
+                        <div className="table-container">
+                          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                            <thead>
+                              <tr style={{ background: C.surface2, borderBottom: `1px solid ${C.border}` }}>
+                                {["PLAYER","STAT","DIR","LINE","EV%","ODDS","BOOK","MATCHUP","RESULT"].map(h => (
+                                  <th key={h} style={{ padding: "8px 12px", textAlign: "left", ...mono, fontSize: 9, letterSpacing: 2, color: C.muted, whiteSpace: "nowrap" }}>{h}</th>
+                                ))}
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {plays.map((p, i) => {
+                                const priceStr     = p.bookOdds > 0 ? `+${p.bookOdds}` : `${p.bookOdds}`;
+                                const resultColor  = p.result === "HIT" ? C.positive : p.result === "MISS" ? C.negative : C.muted;
+                                const resultBg     = p.result === "HIT" ? "rgba(163,255,87,0.1)" : p.result === "MISS" ? "rgba(255,61,113,0.1)" : "rgba(74,96,112,0.1)";
+                                const resultBorder = p.result === "HIT" ? "rgba(163,255,87,0.3)" : p.result === "MISS" ? "rgba(255,61,113,0.3)" : "rgba(74,96,112,0.3)";
+                                const resultLabel  = p.result ?? (isToday ? "TODAY" : "PENDING");
+                                return (
+                                  <tr key={p.id || i} style={{ borderBottom: `1px solid rgba(30,45,61,0.5)`, background: i%2===0 ? "transparent" : "rgba(20,28,36,0.3)" }}>
+                                    <td style={{ padding: "9px 12px", fontSize: 13, fontWeight: 500, whiteSpace: "nowrap" }}>{p.player}</td>
+                                    <td style={{ padding: "9px 12px" }}>
+                                      <span style={{ background: C.surface2, border: `1px solid ${C.border}`, padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, color: C.neutral }}>{p.market}</span>
+                                    </td>
+                                    <td style={{ padding: "9px 12px" }}>
+                                      <span style={{ padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, fontWeight: 600, background: p.direction==="Over" ? "rgba(163,255,87,0.1)" : "rgba(255,61,113,0.1)", color: p.direction==="Over" ? C.positive : C.negative, border: `1px solid ${p.direction==="Over" ? "rgba(163,255,87,0.2)" : "rgba(255,61,113,0.2)"}` }}>
+                                        {p.direction.toUpperCase()}
+                                      </span>
+                                    </td>
+                                    <td style={{ padding: "9px 12px", ...mono, fontSize: 12 }}>{p.line}</td>
+                                    <td style={{ padding: "9px 12px", ...mono, fontSize: 12, fontWeight: 600, color: p.ev > 0 ? C.positive : C.negative }}>
+                                      {p.ev > 0 ? "+" : ""}{(p.ev * 100).toFixed(1)}%
+                                    </td>
+                                    <td style={{ padding: "9px 12px", ...mono, fontSize: 12, color: p.bookOdds > 0 ? C.positive : C.negative }}>{priceStr}</td>
+                                    <td style={{ padding: "9px 12px", ...mono, fontSize: 10, color: C.muted }}>
+                                      {p.bookmaker === "DraftKings" ? "DK" : p.bookmaker === "FanDuel" ? "FD" : p.bookmaker}
+                                    </td>
+                                    <td style={{ padding: "9px 12px", ...mono, fontSize: 10, color: C.muted, whiteSpace: "nowrap" }}>
+                                      {p.awayAbbr} @ {p.homeAbbr}
+                                    </td>
+                                    <td style={{ padding: "9px 12px" }}>
+                                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                        <span style={{ padding: "2px 7px", borderRadius: 2, ...mono, fontSize: 9, fontWeight: 700, color: resultColor, background: resultBg, border: `1px solid ${resultBorder}`, whiteSpace: "nowrap" }}>
+                                          {resultLabel}
+                                        </span>
+                                        {p.actual !== null && (
+                                          <span style={{ ...mono, fontSize: 10, color: C.muted }}>({p.actual})</span>
+                                        )}
+                                      </div>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            );
+          })()}
 
           <div style={{ ...mono, fontSize: 9, color: C.muted, opacity: 0.4, marginTop: 10, letterSpacing: 1 }}>
             // LIVE ODDS: THE ODDS API · BOOKS: DRAFTKINGS · FANDUEL · BETMGM · MODEL: DEF RTG + PACE + HOME/AWAY · FOR EDUCATIONAL USE ONLY
