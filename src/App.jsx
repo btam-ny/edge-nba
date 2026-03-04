@@ -252,35 +252,6 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
   });
 }
 
-// ─── LIVE TEAM DEF from NBA API (Proxy via /api/defense) ──────────────────
-async function fetchLiveTeamDef() {
-  const res = await fetch("/api/defense");
-  if (!res.ok) throw new Error("Failed to fetch defense stats from proxy");
-  
-  const data = await res.json();
-  const result = {};
-
-  const NbaNamesToAbbr = {
-    "Atlanta Hawks": "ATL", "Boston Celtics": "BOS", "Brooklyn Nets": "BKN",
-    "Charlotte Hornets": "CHA", "Chicago Bulls": "CHI", "Cleveland Cavaliers": "CLE",
-    "Dallas Mavericks": "DAL", "Denver Nuggets": "DEN", "Detroit Pistons": "DET",
-    "Golden State Warriors": "GSW", "Houston Rockets": "HOU", "Indiana Pacers": "IND",
-    "LA Clippers": "LAC", "Los Angeles Lakers": "LAL", "Memphis Grizzlies": "MEM",
-    "Miami Heat": "MIA", "Milwaukee Bucks": "MIL", "Minnesota Timberwolves": "MIN",
-    "New Orleans Pelicans": "NOP", "New York Knicks": "NYK", "Oklahoma City Thunder": "OKC",
-    "Orlando Magic": "ORL", "Philadelphia 76ers": "PHI", "Phoenix Suns": "PHX",
-    "Portland Trail Blazers": "POR", "Sacramento Kings": "SAC", "San Antonio Spurs": "SAS",
-    "Toronto Raptors": "TOR", "Utah Jazz": "UTA", "Washington Wizards": "WAS"
-  };
-
-  for (const [teamName, stats] of Object.entries(data)) {
-    const abbr = NbaNamesToAbbr[teamName];
-    if (abbr) {
-      result[abbr] = stats;
-    }
-  }
-  return result;
-}
 
 // ─── STYLES ────────────────────────────────────────────────────────────────
 const C = {
@@ -326,17 +297,7 @@ export default function App() {
   }, [events, props, lastUpdated]);
 
   useEffect(() => {
-    // 1. Fetch Defense
-    fetchLiveTeamDef()
-      .then(data => {
-        if (data && Object.keys(data).length > 20) {
-          setTeamDef(data);
-          setTeamDefSource("LIVE");
-        }
-      })
-      .catch(() => {}); // silently fall back to static
-
-    // 2. Fetch Injuries
+    // 1. Fetch Injuries
     fetch("https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/injuries")
       .then(res => res.json())
       .then(data => {
@@ -357,12 +318,16 @@ export default function App() {
       .catch(err => console.error("Could not fetch injuries", err));
 
 
-    // 4. Fetch Advanced Stats, B2B, and Last 10 Games averages
+    // 4. Fetch Advanced Stats, B2B, Last 10 Games, and Team Def/Pace
     fetch("/api/advanced")
       .then(res => res.json())
       .then(data => {
         if (data?.players) setAdvancedData(data);
-        if (data?.last10) setLast10Data(data.last10);
+        if (data?.last10)  setLast10Data(data.last10);
+        if (data?.teamDef && Object.keys(data.teamDef).length > 20) {
+          setTeamDef(data.teamDef);
+          setTeamDefSource("LIVE");
+        }
       })
       .catch(err => console.error("Could not fetch advanced data", err));
   }, []);
