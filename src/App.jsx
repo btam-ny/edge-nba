@@ -199,10 +199,9 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
       homeRoadMult = isHome ? 1.05 : 0.95;
     }
 
-    // 4. Back-to-Back Rest Penalty
-    const isB2B = playerTeam
-      ? advancedData.b2bTeams.includes(playerTeam)
-      : advancedData.b2bTeams.includes(homeAbbr) || advancedData.b2bTeams.includes(awayAbbr);
+    // 4. Back-to-Back Rest Penalty (skip when team unknown — checking either team
+    // would fire on most games and systematically bias unders)
+    const isB2B = playerTeam ? advancedData.b2bTeams.includes(playerTeam) : false;
     let b2bMult = 1.0;
     if (isB2B) {
       if (market === "PTS" || market === "AST") b2bMult = 0.97;
