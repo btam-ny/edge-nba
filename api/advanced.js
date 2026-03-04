@@ -33,7 +33,26 @@ export default async function handler(req, res) {
       };
     }
 
-    // 2. Fetch yesterday's scoreboard to determine B2B (Back-To-Back) teams
+    // 2. Fetch last 10 games base stats (same API, sequential to avoid rate limits)
+    const l10Url = `https://stats.nba.com/stats/leaguedashplayerstats?LastNGames=10&MeasureType=Base&Month=0&OpponentTeamID=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlusMinus=N&Rank=N&Season=2025-26&SeasonType=Regular%20Season&LeagueID=00`;
+    const l10Res = await fetch(l10Url, { headers: nbaHeaders });
+    const last10 = {};
+    if (l10Res.ok) {
+      const l10Data = await l10Res.json();
+      const l10Head = l10Data.resultSets[0].headers;
+      const l10Name = l10Head.indexOf("PLAYER_NAME");
+      const l10Pts  = l10Head.indexOf("PTS");
+      const l10Reb  = l10Head.indexOf("REB");
+      const l10Ast  = l10Head.indexOf("AST");
+      const l10Fg3m = l10Head.indexOf("FG3M");
+      for (const row of l10Data.resultSets[0].rowSet) {
+        last10[row[l10Name]] = {
+          PTS: row[l10Pts], REB: row[l10Reb], AST: row[l10Ast], "3PM": row[l10Fg3m],
+        };
+      }
+    }
+
+    // 3. Fetch yesterday's scoreboard to determine B2B (Back-To-Back) teams
     // Use server's current date (we want yesterday relative to US time)
     // To be safe, just subtract 24 hours
     const d = new Date();
@@ -61,7 +80,7 @@ export default async function handler(req, res) {
       }
     }
 
-    res.status(200).json({ players: playerMap, b2bTeams: Array.from(b2bTeams) });
+    res.status(200).json({ players: playerMap, b2bTeams: Array.from(b2bTeams), last10 });
   } catch (error) {
     console.error("Advanced Stats proxy error:", error);
     res.status(500).json({ error: error.message });

@@ -357,21 +357,14 @@ export default function App() {
       .catch(err => console.error("Could not fetch injuries", err));
 
 
-    // 4. Fetch Advanced Stats & B2B
+    // 4. Fetch Advanced Stats, B2B, and Last 10 Games averages
     fetch("/api/advanced")
       .then(res => res.json())
       .then(data => {
         if (data?.players) setAdvancedData(data);
+        if (data?.last10) setLast10Data(data.last10);
       })
       .catch(err => console.error("Could not fetch advanced data", err));
-
-    // 5. Fetch Last 10 Games averages
-    fetch("/api/last10")
-      .then(res => res.json())
-      .then(data => {
-        if (data && !data.error) setLast10Data(data);
-      })
-      .catch(err => console.error("Could not fetch last 10 data", err));
   }, []);
 
   // ── API helpers ──────────────────────────────────────────────────────────
