@@ -4,6 +4,12 @@ export default async function handler(_req, res) {
     const espnToNba = { "GS": "GSW", "UTAH": "UTA", "NO": "NOP", "SA": "SAS", "NY": "NYK", "WSH": "WAS", "BKN": "BKN" };
     const normAbbr  = a => espnToNba[a?.toUpperCase()] || a?.toUpperCase() || "";
 
+    const fetchWithTimeout = (url, ms = 5000) => {
+      const ctrl = new AbortController();
+      const id   = setTimeout(() => ctrl.abort(), ms);
+      return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(id));
+    };
+
     // ── 1. Fetch last 21 days of scoreboards in parallel ─────────────────────
     const today = new Date();
     const fmt   = d => d.toISOString().split('T')[0].replace(/-/g, '');
@@ -16,7 +22,7 @@ export default async function handler(_req, res) {
 
     const scoreboards = await Promise.all(
       dateStrs.map(ds =>
-        fetch(`https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ds}`)
+        fetchWithTimeout(`https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ds}`)
           .then(r => r.json())
           .catch(() => null)
       )
@@ -34,7 +40,7 @@ export default async function handler(_req, res) {
     // ── 2. Fetch up to 15 boxscores in parallel ───────────────────────────────
     const boxscores = await Promise.all(
       recentIds.map(id =>
-        fetch(`https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${id}`)
+        fetchWithTimeout(`https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${id}`)
           .then(r => r.json())
           .catch(() => null)
       )
@@ -138,7 +144,7 @@ export default async function handler(_req, res) {
     d.setDate(d.getDate() - 1);
     const yyyymmdd = d.toISOString().split('T')[0].replace(/-/g, '');
 
-    const espnRes  = await fetch(
+    const espnRes  = await fetchWithTimeout(
       `https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${yyyymmdd}`
     );
     const espnData = await espnRes.json();
