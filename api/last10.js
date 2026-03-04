@@ -1,10 +1,15 @@
-export default async function handler(req, res) {
+export default async function handler(_req, res) {
   try {
     const nbaHeaders = {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Referer': 'https://www.nba.com/',
-      'Origin': 'https://stats.nba.com',
+      'Origin': 'https://www.nba.com',
       'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'x-nba-stats-origin': 'stats',
+      'x-nba-stats-token': 'true',
     };
 
     const nbaUrl = `https://stats.nba.com/stats/leaguedashplayerstats?LastNGames=10&MeasureType=Base&Month=0&OpponentTeamID=0&PaceAdjust=N&PerMode=PerGame&Period=0&PlusMinus=N&Rank=N&Season=2025-26&SeasonType=Regular%20Season&LeagueID=00`;
@@ -23,9 +28,9 @@ export default async function handler(req, res) {
     const playerMap = {};
     for (const row of nbaData.resultSets[0].rowSet) {
       playerMap[row[idxName]] = {
-        PTS:  row[idxPts],
-        REB:  row[idxReb],
-        AST:  row[idxAst],
+        PTS:   row[idxPts],
+        REB:   row[idxReb],
+        AST:   row[idxAst],
         "3PM": row[idxFg3m],
       };
     }
