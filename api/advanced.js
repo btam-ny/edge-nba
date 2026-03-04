@@ -22,7 +22,7 @@ export default async function handler(_req, res) {
 
     const scoreboards = await Promise.all(
       dateStrs.map(ds =>
-        fetchWithTimeout(`https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ds}`)
+        fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ds}`)
           .then(r => r.json())
           .catch(() => null)
       )
@@ -40,7 +40,7 @@ export default async function handler(_req, res) {
     // ── 2. Fetch up to 15 boxscores in parallel ───────────────────────────────
     const boxscores = await Promise.all(
       recentIds.map(id =>
-        fetchWithTimeout(`https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${id}`)
+        fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${id}`)
           .then(r => r.json())
           .catch(() => null)
       )
@@ -145,7 +145,7 @@ export default async function handler(_req, res) {
     const yyyymmdd = d.toISOString().split('T')[0].replace(/-/g, '');
 
     const espnRes  = await fetchWithTimeout(
-      `https://site.web.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${yyyymmdd}`
+      `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${yyyymmdd}`
     );
     const espnData = await espnRes.json();
 
