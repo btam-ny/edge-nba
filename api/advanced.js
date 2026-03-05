@@ -1,171 +1,125 @@
-export default async function handler(_req, res) {
-  try {
-    // ESPN abbreviation → NBA standard
-    const espnToNba = { "GS": "GSW", "UTAH": "UTA", "NO": "NOP", "SA": "SAS", "NY": "NYK", "WSH": "WAS", "BKN": "BKN" };
-    const normAbbr  = a => espnToNba[a?.toUpperCase()] || a?.toUpperCase() || "";
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY || "7f15289082msh2b80f8151be1e74p16fba4jsnff9ea5c99f8d";
+const HOST = "tank01-fantasy-stats.p.rapidapi.com";
 
-    const fetchWithTimeout = (url, ms = 5000) => {
-      const ctrl = new AbortController();
-      const id   = setTimeout(() => ctrl.abort(), ms);
-      return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(id));
+const tank01 = (endpoint, params = {}) => {
+  const url = new URL(`https://${HOST}/${endpoint}`);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  return fetch(url.toString(), {
+    headers: {
+      "X-RapidAPI-Key":  RAPIDAPI_KEY,
+      "X-RapidAPI-Host": HOST,
+    },
+  }).then(r => r.json());
+};
+
+// Normalize player names for fuzzy matching (strip punctuation, lowercase)
+const normName = s => s?.toLowerCase().replace(/[^a-z ]/g, "").trim() || "";
+
+export default async function handler(req, res) {
+  try {
+    const playerNames = req.query?.players
+      ? req.query.players.split(",").map(p => p.trim()).filter(Boolean)
+      : [];
+
+    const today     = new Date();
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const fmtDate = d => {
+      const y   = d.getFullYear();
+      const m   = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}${m}${day}`;
     };
 
-    // ── 1. Fetch last 21 days of scoreboards in parallel ─────────────────────
-    const today = new Date();
-    const fmt   = d => d.toISOString().split('T')[0].replace(/-/g, '');
+    // ── 1 & 2: Parallel — all teams (rosters + stats) + yesterday's schedule ─
+    const [teamsData, ydayGames] = await Promise.all([
+      tank01("getNBATeams", { rosters: "true", statsToGet: "averages", teamStats: "true" }),
+      tank01("getNBAGamesForDate", { gameDate: fmtDate(yesterday) }),
+    ]);
 
-    const dateStrs = Array.from({ length: 21 }, (_, i) => {
-      const d = new Date(today);
-      d.setDate(d.getDate() - (i + 1));
-      return fmt(d);
-    });
+    // ── 3. Build player map + teamDef from team data ──────────────────────────
+    const players    = {};  // { "LeBron James": { team, usage, playerID } }
+    const playerIDMap = {}; // { normName: playerID } for fuzzy matching
+    const teamDef    = {};  // { "LAL": { defRtg, pace } }
 
-    const scoreboards = await Promise.all(
-      dateStrs.map(ds =>
-        fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${ds}`)
-          .then(r => r.json())
-          .catch(() => null)
-      )
-    );
+    for (const team of (teamsData.body || [])) {
+      const abbr = team.teamAbv;
+      const oppg = parseFloat(team.oppg) || 112;
+      const ppg  = parseFloat(team.ppg)  || 112;
 
-    // Collect completed event IDs, most recent first (scoreboards[0] = yesterday)
-    const eventIds = [];
-    for (const sb of scoreboards) {
-      for (const event of (sb?.events || [])) {
-        if (event.status?.type?.completed) eventIds.push(event.id);
-      }
-    }
-    const recentIds = eventIds.slice(0, 15);
+      // Pace proxy: avg possessions per game ≈ (ppg + oppg) / 2.2
+      // (assumes ~1.1 pts per possession, both teams)
+      const pace = (ppg + oppg) / 2.2;
 
-    // ── 2. Fetch up to 15 boxscores in parallel ───────────────────────────────
-    const boxscores = await Promise.all(
-      recentIds.map(id =>
-        fetchWithTimeout(`https://site.api.espn.com/apis/site/v2/sports/basketball/nba/summary?event=${id}`)
-          .then(r => r.json())
-          .catch(() => null)
-      )
-    );
+      teamDef[abbr] = { defRtg: oppg, pace };
 
-    // ── 3. Parse player L10 stats + team def/pace from the same boxscores ────
-    const playerGames = {}; // { playerName: [{ PTS, REB, AST, 3PM }, ...] }
-    const teamGameLog = {}; // { abbr: [{ poss, ptsAllowed }, ...] }
+      for (const [playerID, info] of Object.entries(team.Roster || {})) {
+        const name = info.longName;
+        if (!name) continue;
 
-    for (const bs of boxscores) {
-      if (!bs?.boxscore?.players) continue;
+        // usage from averages — Tank01 returns as a percentage (e.g. 28.5), normalize to 0-1
+        const usageRaw = parseFloat(info.stats?.usgRate ?? info.stats?.usage ?? 0);
+        const usage    = usageRaw > 1 ? usageRaw / 100 : usageRaw;
 
-      const gameTeams = []; // collect both teams to pair them for def computation
-
-      for (const teamBlock of bs.boxscore.players) {
-        const abbr = normAbbr(teamBlock.team?.abbreviation);
-        let teamPts = 0, teamFga = 0, teamFta = 0, teamOreb = 0, teamTov = 0;
-
-        for (const statsGroup of (teamBlock.statistics || [])) {
-          const keys     = statsGroup.keys || statsGroup.statKeys || [];
-          const ptIdx    = keys.indexOf("PTS");
-          const rebIdx   = keys.indexOf("REB");
-          const astIdx   = keys.indexOf("AST");
-          const threeIdx = keys.indexOf("3PT");
-          const fgIdx    = keys.indexOf("FG");
-          const ftIdx    = keys.indexOf("FT");
-          const orebIdx  = keys.indexOf("OREB");
-          const tovIdx   = keys.indexOf("TO");
-
-          for (const ath of (statsGroup.athletes || [])) {
-            const name  = ath.athlete?.displayName;
-            const stats = ath.stats || [];
-            if (!stats.length) continue;
-
-            // ── Player L10 ──
-            if (name) {
-              const pts = parseFloat(stats[ptIdx]);
-              if (!isNaN(pts)) {
-                if (!playerGames[name]) playerGames[name] = [];
-                playerGames[name].push({
-                  PTS:   pts,
-                  REB:   parseFloat(stats[rebIdx]) || 0,
-                  AST:   parseFloat(stats[astIdx]) || 0,
-                  "3PM": parseInt((stats[threeIdx] || "0-0").split("-")[0]) || 0,
-                });
-              }
-            }
-
-            // ── Team totals for def/pace ──
-            teamPts  += parseFloat(stats[ptIdx]) || 0;
-            teamFga  += parseInt((stats[fgIdx]  || "0-0").split("-")[1]) || 0;
-            teamFta  += parseInt((stats[ftIdx]  || "0-0").split("-")[1]) || 0;
-            teamOreb += parseFloat(stats[orebIdx]) || 0;
-            teamTov  += parseFloat(stats[tovIdx])  || 0;
-          }
-        }
-
-        const poss = teamFga + 0.44 * teamFta - teamOreb + teamTov;
-        gameTeams.push({ abbr, pts: teamPts, poss });
-      }
-
-      // Pair both teams to compute def rating (points allowed / own possessions)
-      if (gameTeams.length === 2) {
-        const [a, b] = gameTeams;
-        if (a.abbr) {
-          if (!teamGameLog[a.abbr]) teamGameLog[a.abbr] = [];
-          teamGameLog[a.abbr].push({ poss: a.poss, ptsAllowed: b.pts });
-        }
-        if (b.abbr) {
-          if (!teamGameLog[b.abbr]) teamGameLog[b.abbr] = [];
-          teamGameLog[b.abbr].push({ poss: b.poss, ptsAllowed: a.pts });
-        }
+        players[name] = { team: abbr, usage, playerID };
+        playerIDMap[normName(name)] = { playerID, canonicalName: name };
       }
     }
 
-    // ── Player L10 averages (last 10 games) ───────────────────────────────────
-    const last10 = {};
-    for (const [name, games] of Object.entries(playerGames)) {
-      const g   = games.slice(0, 10);
-      const avg = key => g.reduce((s, x) => s + (x[key] || 0), 0) / g.length;
-      last10[name] = { PTS: avg("PTS"), REB: avg("REB"), AST: avg("AST"), "3PM": avg("3PM") };
-    }
-
-    // ── Team def rating + pace (last 10 games) ────────────────────────────────
-    // defRtg  = opponent points per 100 possessions
-    // pace    = average possessions per game (proxy for NBA pace metric)
-    const teamDef = {};
-    for (const [abbr, games] of Object.entries(teamGameLog)) {
-      const g          = games.slice(0, 10);
-      const totalPoss  = g.reduce((s, x) => s + x.poss, 0);
-      const totalPtsA  = g.reduce((s, x) => s + x.ptsAllowed, 0);
-      teamDef[abbr] = {
-        defRtg: totalPoss > 0 ? (totalPtsA / totalPoss) * 100 : 110,
-        pace:   totalPoss / g.length,
-      };
-    }
-
-    // ── 4. B2B detection from yesterday's ESPN scoreboard ────────────────────
-    const d = new Date();
-    d.setHours(d.getHours() - 10); // approximate US timezone offset
-    d.setDate(d.getDate() - 1);
-    const yyyymmdd = d.toISOString().split('T')[0].replace(/-/g, '');
-
-    const espnRes  = await fetchWithTimeout(
-      `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${yyyymmdd}`
-    );
-    const espnData = await espnRes.json();
-
+    // ── 4. B2B: teams that played yesterday ───────────────────────────────────
     const b2bTeams = new Set();
-    if (espnData.events) {
-      for (const event of espnData.events) {
-        event.competitions[0].competitors.forEach(c => {
-          b2bTeams.add(normAbbr(c.team.abbreviation));
-        });
-      }
+    for (const game of (ydayGames.body || [])) {
+      if (game.away) b2bTeams.add(game.away);
+      if (game.home) b2bTeams.add(game.home);
+    }
+
+    // ── 5. L10 game logs for requested players ────────────────────────────────
+    const last10 = {};
+
+    if (playerNames.length > 0) {
+      await Promise.all(
+        playerNames.map(async name => {
+          // Exact match → fall back to normalized match
+          const exactEntry   = players[name];
+          const fuzzyEntry   = playerIDMap[normName(name)];
+          const playerID     = exactEntry?.playerID ?? fuzzyEntry?.playerID;
+          const canonicalName = exactEntry ? name : fuzzyEntry?.canonicalName;
+
+          if (!playerID || !canonicalName) return;
+
+          try {
+            const logData = await tank01("getNBAPlayerGameLog", {
+              playerID,
+              numberOfGames: "10",
+            });
+
+            const games = (logData.body?.playerGameLog || []).slice(0, 10);
+            if (!games.length) return;
+
+            const avg = key =>
+              games.reduce((s, g) => s + (parseFloat(g[key]) || 0), 0) / games.length;
+
+            last10[name] = {
+              PTS:  avg("pts"),
+              REB:  avg("reb"),
+              AST:  avg("ast"),
+              "3PM": avg("tptfgm"),
+            };
+          } catch {
+            // Skip — individual player failure shouldn't break the whole response
+          }
+        })
+      );
     }
 
     res.status(200).json({
-      players:  {},           // USG% omitted — stats.nba.com blocked from cloud IPs
-      b2bTeams: Array.from(b2bTeams),
-      last10,
+      players,
+      b2bTeams: [...b2bTeams],
       teamDef,
+      last10,
     });
   } catch (error) {
-    console.error("Advanced Stats proxy error:", error);
+    console.error("Advanced Stats error:", error);
     res.status(500).json({ error: error.message });
   }
 }

@@ -324,18 +324,6 @@ export default function App() {
       .catch(err => console.error("Could not fetch injuries", err));
 
 
-    // 4. Fetch Advanced Stats, B2B, Last 10 Games, and Team Def/Pace
-    fetch("/api/advanced")
-      .then(res => res.json())
-      .then(data => {
-        if (data?.players) setAdvancedData(data);
-        if (data?.last10)  setLast10Data(data.last10);
-        if (data?.teamDef && Object.keys(data.teamDef).length > 20) {
-          setTeamDef(data.teamDef);
-          setTeamDefSource("LIVE");
-        }
-      })
-      .catch(err => console.error("Could not fetch advanced data", err));
   }, []);
 
   // ── API helpers ──────────────────────────────────────────────────────────
@@ -399,9 +387,31 @@ export default function App() {
         await new Promise(r => setTimeout(r, 700));
       }
 
-      // ── Step 3: Apply adjustments + EV ──────────────────────────────────
+      // ── Step 3: Fetch advanced stats (Tank01) with player names ─────────
+      setLoadingMsg("Fetching advanced stats (defense, pace, player logs)…");
+      const uniquePlayers = [...new Set(allProps.map(p => p.player))].join(",");
+      let currentTeamDef     = teamDef;
+      let currentAdvancedData = advancedData;
+      try {
+        const advRes  = await fetch(`/api/advanced?players=${encodeURIComponent(uniquePlayers)}`);
+        const advData = await advRes.json();
+        if (advData?.players) {
+          setAdvancedData(advData);
+          currentAdvancedData = advData;
+        }
+        if (advData?.last10)  setLast10Data(advData.last10);
+        if (advData?.teamDef && Object.keys(advData.teamDef).length > 20) {
+          setTeamDef(advData.teamDef);
+          setTeamDefSource("LIVE");
+          currentTeamDef = advData.teamDef;
+        }
+      } catch (err) {
+        console.error("Could not fetch advanced data", err);
+      }
+
+      // ── Step 4: Apply adjustments + EV ──────────────────────────────────
       setLoadingMsg("Applying advanced adjustments (Def, Pace, B2B, H/A, Usage)…");
-      const withEV = applyAdjustmentsAndEV(allProps, teamDef, advancedData, injuries);
+      const withEV = applyAdjustmentsAndEV(allProps, currentTeamDef, currentAdvancedData, injuries);
       setProps(withEV);
       setLastUpdated("UPDATED " + new Date().toLocaleTimeString());
 
