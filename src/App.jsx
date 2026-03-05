@@ -387,13 +387,12 @@ export default function App() {
         await new Promise(r => setTimeout(r, 700));
       }
 
-      // ── Step 3: Fetch advanced stats (Tank01) with player names ─────────
+      // ── Step 3: Fetch advanced stats (Tank01) ───────────────────────────
       setLoadingMsg("Fetching advanced stats (defense, pace, player logs)…");
-      const uniquePlayers = [...new Set(allProps.map(p => p.player))].join(",");
-      let currentTeamDef     = teamDef;
+      let currentTeamDef      = teamDef;
       let currentAdvancedData = advancedData;
       try {
-        const advRes  = await fetch(`/api/advanced?players=${encodeURIComponent(uniquePlayers)}`);
+        const advRes  = await fetch("/api/advanced");
         const advData = await advRes.json();
         if (advData?.players) {
           setAdvancedData(advData);
