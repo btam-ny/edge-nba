@@ -12,7 +12,7 @@ const tank01 = (endpoint, params = {}) => {
   }).then(r => r.json());
 };
 
-const espnFetch = (url, ms = 5000) => {
+const espnFetch = (url, ms = 8000) => {
   const ctrl = new AbortController();
   const id   = setTimeout(() => ctrl.abort(), ms);
   return fetch(url, { signal: ctrl.signal }).then(r => r.json()).finally(() => clearTimeout(id));
@@ -33,7 +33,7 @@ export default async function handler(_req, res) {
 
     // ── 1 & 2: Tank01 — teams (rosters + season avgs) + yesterday's schedule ─
     // ── 3: ESPN — last 12 days of scoreboards for box score IDs ──────────────
-    const espnDateStrs = Array.from({ length: 12 }, (_, i) => {
+    const espnDateStrs = Array.from({ length: 8 }, (_, i) => {
       const d = new Date(today);
       d.setDate(d.getDate() - (i + 1));
       return fmtEspn(d);
@@ -80,7 +80,7 @@ export default async function handler(_req, res) {
         if (event.status?.type?.completed) eventIds.push(event.id);
       }
     }
-    const recentIds = eventIds.slice(0, 12);
+    const recentIds = eventIds.slice(0, 8);
 
     const boxscores = await Promise.all(
       recentIds.map(id =>
