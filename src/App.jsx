@@ -141,7 +141,7 @@ function parseEventProps(event) {
 }
 
 // ─── APPLY MODEL ADJUSTMENTS + COMPUTE EV ─────────────────────────────────
-function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
+function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries, last10Data = {}) {
   // Compute league averages from loaded data so adjustments are always centered,
   // regardless of whether static or live defense data is in use.
   const defVals = Object.values(teamDef);
@@ -213,11 +213,21 @@ function applyAdjustmentsAndEV(props, teamDef, advancedData, injuries) {
     let usageMult = 1.0;
     // Don't apply usage bump to the star themselves who is OUT
     if (bumpPerTeam[playerTeam] && injuries[player] !== "Out") {
-      usageMult = 1.08; 
+      usageMult = 1.08;
+    }
+
+    // 6. L10 trend multiplier — recent form vs book line
+    // If player's L10 avg > line they're running hot; < line they're cold
+    // Dampened to 40% weight, capped at ±10%
+    const l10Avg = last10Data[player]?.[market];
+    let l10Mult = 1.0;
+    if (l10Avg && l10Avg > 0 && line > 0) {
+      const ratio = l10Avg / line;
+      l10Mult = Math.max(0.90, Math.min(1.10, 1 + (ratio - 1) * 0.4));
     }
 
     // Combine all Multipliers
-    let finalMult = defMult * paceMult * homeRoadMult * b2bMult * usageMult;
+    let finalMult = defMult * paceMult * homeRoadMult * b2bMult * usageMult * l10Mult;
     finalMult = Math.max(0.80, Math.min(1.20, finalMult)); // hard cap multipliers
 
     // Adjusted expected value (book line as baseline)
@@ -410,7 +420,8 @@ export default function App() {
 
       // ── Step 4: Apply adjustments + EV ──────────────────────────────────
       setLoadingMsg("Applying advanced adjustments (Def, Pace, B2B, H/A, Usage)…");
-      const withEV = applyAdjustmentsAndEV(allProps, currentTeamDef, currentAdvancedData, injuries);
+      const currentLast10 = advData?.last10 ?? last10Data;
+      const withEV = applyAdjustmentsAndEV(allProps, currentTeamDef, currentAdvancedData, injuries, currentLast10);
       setProps(withEV);
       setLastUpdated("UPDATED " + new Date().toLocaleTimeString());
 
