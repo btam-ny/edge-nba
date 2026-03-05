@@ -61,7 +61,7 @@ export default async function handler(req, res) {
         const usageRaw = parseFloat(info.stats?.usgRate ?? info.stats?.usage ?? 0);
         const usage    = usageRaw > 1 ? usageRaw / 100 : usageRaw;
 
-        players[name] = { team: abbr, usage, playerID };
+        players[name] = { team: abbr, usage, playerID, _raw: info };
         playerIDMap[normName(name)] = { playerID, canonicalName: name };
       }
     }
