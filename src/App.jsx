@@ -401,6 +401,7 @@ export default function App() {
       setLoadingMsg("Fetching advanced stats (defense, pace, player logs)…");
       let currentTeamDef      = teamDef;
       let currentAdvancedData = advancedData;
+      let currentLast10       = last10Data;
       try {
         const advRes  = await fetch("/api/advanced");
         const advData = await advRes.json();
@@ -408,7 +409,10 @@ export default function App() {
           setAdvancedData(advData);
           currentAdvancedData = advData;
         }
-        if (advData?.last10)  setLast10Data(advData.last10);
+        if (advData?.last10) {
+          setLast10Data(advData.last10);
+          currentLast10 = advData.last10;
+        }
         if (advData?.teamDef && Object.keys(advData.teamDef).length > 20) {
           setTeamDef(advData.teamDef);
           setTeamDefSource("LIVE");
@@ -420,7 +424,6 @@ export default function App() {
 
       // ── Step 4: Apply adjustments + EV ──────────────────────────────────
       setLoadingMsg("Applying advanced adjustments (Def, Pace, B2B, H/A, Usage)…");
-      const currentLast10 = advData?.last10 ?? last10Data;
       const withEV = applyAdjustmentsAndEV(allProps, currentTeamDef, currentAdvancedData, injuries, currentLast10);
       setProps(withEV);
       setLastUpdated("UPDATED " + new Date().toLocaleTimeString());
